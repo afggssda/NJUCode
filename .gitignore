@@ -2,7 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+.nju_code/
 # 其他常见的 Python 忽略项（可选）
 .venv/
 env/
