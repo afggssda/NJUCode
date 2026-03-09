@@ -1,0 +1,176 @@
+Screen {
+  layout: vertical;
+}
+
+Button {
+  height: 3;
+  min-height: 3;
+  padding: 0 1;
+  border: round $panel;
+}
+
+Button.-primary {
+  border: round $primary;
+}
+
+Button.-success {
+  border: round $success;
+}
+
+Button.-warning {
+  border: round $warning;
+}
+
+Button.-error {
+  border: round $error;
+}
+
+#root {
+  height: 1fr;
+  layout: horizontal;
+}
+
+#left_tabs {
+  width: 22%;
+  min-width: 28;
+  border: round $primary;
+}
+
+#center_tabs {
+  width: 48%;
+  min-width: 30;
+  border: round $accent;
+}
+
+#right_tabs {
+  width: 30%;
+  min-width: 36;
+  border: round $secondary;
+}
+
+#splitter_left,
+#splitter_right {
+  width: 2;
+  min-width: 2;
+  background: $panel-darken-1;
+  border: round $panel-darken-1;
+}
+
+.panel-title {
+  padding: 0 1;
+  text-style: bold;
+}
+
+.sub-title {
+  padding: 0 1;
+  color: $text-muted;
+}
+
+#chat_messages {
+  height: 1fr;
+  border: round $surface;
+}
+
+#code_actions {
+  height: auto;
+  layout: horizontal;
+  padding: 0 1;
+}
+
+#code_editor {
+  height: 1fr;
+  border: round $surface;
+}
+
+#chat_input_row {
+  height: auto;
+  layout: horizontal;
+  padding: 0 1 1 1;
+}
+
+#send_btn,
+#stop_btn {
+  width: 10;
+  margin-left: 1;
+}
+
+.message-row {
+  width: 1fr;
+  height: auto;
+  layout: horizontal;
+  padding: 0 1;
+}
+
+.bubble-spacer {
+  width: 1fr;
+}
+
+.chat-bubble {
+  max-width: 80%;
+  padding: 1 2;
+  border: round $panel;
+}
+
+.bubble-user {
+  background: #7fb7e6;
+  color: #0f1720;
+  border: round #7fb7e6;
+}
+
+.bubble-assistant {
+  background: $background;
+  color: $text;
+}
+
+#chat_status {
+  padding: 0 1;
+  color: $text-muted;
+}
+
+#chat_input {
+  width: 1fr;
+}
+
+#workspace_tree {
+  height: 1fr;
+  border: round $surface;
+}
+
+#mirror_buttons {
+  height: auto;
+  layout: horizontal;
+}
+
+#mirror_buttons Button {
+  margin-right: 1;
+}
+
+#session_list {
+  height: 1fr;
+  border: round $surface;
+}
+
+#rename_session_input {
+  width: 1fr;
+  margin: 0 1 1 1;
+}
+
+#session_action_row {
+  height: auto;
+  layout: horizontal;
+  padding: 0 1 1 1;
+}
+
+#session_action_row Button {
+  width: 1fr;
+  min-width: 8;
+}
+
+#delete_session_btn {
+  margin-left: 1;
+}
+
+.tool-label {
+  padding: 0 1;
+  color: $text;
+}
