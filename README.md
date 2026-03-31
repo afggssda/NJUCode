@@ -2,6 +2,8 @@
 
 `NJUCode` 是一个基于 Textual 的终端代码助手原型。项目正在从“聊天壳”逐步演进为可检索、可分析、可安全修改代码的 Code Agent。
 
+## 使用前请自行替换API key https://www.modelscope.cn/my/access/token
+
 ## 当前进度
 - 已完成：WBS-1（项目初始化）、WBS-2（CLI 与会话系统）
 - 基本完成：WBS-3（上下文分析与检索，含检索工作台）
