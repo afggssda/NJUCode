@@ -49,6 +49,7 @@ class ConfigPanel(Vertical):
         yield Label("Model (OpenAI Compatible)", classes="panel-title")
         yield Label("Mirror Presets", classes="sub-title")
         with Horizontal(id="mirror_buttons"):
+            yield Button("AtlasCloud", id="mirror-atlascloud")
             yield Button("ModelScope", id="mirror-modelscope")
             yield Button("Official", id="mirror-official")
             yield Button("OpenRouter", id="mirror-openrouter")

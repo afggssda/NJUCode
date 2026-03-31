@@ -34,12 +34,14 @@ class AppState:
         self.active_session_id = self.sessions[0].session_id
         self.tools: Dict[str, ToolToggle] = {tool.key: tool for tool in DEFAULT_TOOLS}
         self.model_config = ModelConfig(
-            base_url=os.getenv("OPENAI_BASE_URL", "https://api-inference.modelscope.cn/v1"),
+            base_url=os.getenv("OPENAI_BASE_URL", "https://api.atlascloud.ai/v1"),
             api_key=os.getenv("OPENAI_API_KEY", ""),
-            model=os.getenv("OPENAI_MODEL", "Qwen/Qwen3.5-35B-A3B"),
+            model=os.getenv("OPENAI_MODEL", "deepseek-v3"),
             model_file=os.getenv("OPENAI_MODEL_FILE", ""),
-            mirror=os.getenv("OPENAI_MIRROR", "modelscope"),
+            mirror=os.getenv("OPENAI_MIRROR", "atlascloud"),
         )
+        self.left_ratio = 0.18
+        self.right_ratio = 0.34
 
     def load(self) -> None:
         """从磁盘加载已保存的设置并恢复到内存。
@@ -58,6 +60,28 @@ class AppState:
         self.model_config.model = model_data.get("model", self.model_config.model)
         self.model_config.model_file = model_data.get("model_file", self.model_config.model_file)
         self.model_config.mirror = model_data.get("mirror", self.model_config.mirror)
+
+        # Env vars should have highest priority so rotating keys in .env takes effect.
+        env_base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+        env_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        env_model = os.getenv("OPENAI_MODEL", "").strip()
+        env_model_file = os.getenv("OPENAI_MODEL_FILE", "").strip()
+        env_mirror = os.getenv("OPENAI_MIRROR", "").strip()
+
+        if env_base_url:
+            self.model_config.base_url = env_base_url
+        if env_api_key:
+            self.model_config.api_key = env_api_key
+        if env_model:
+            self.model_config.model = env_model
+        if env_model_file:
+            self.model_config.model_file = env_model_file
+        if env_mirror:
+            self.model_config.mirror = env_mirror
+
+        ui_data = data.get("ui", {})
+        self.left_ratio = max(0.0, min(0.9, float(ui_data.get("left_ratio", self.left_ratio))))
+        self.right_ratio = max(0.0, min(0.9, float(ui_data.get("right_ratio", self.right_ratio))))
 
         tools_data = data.get("tools", {})
         for key, value in tools_data.items():
@@ -106,6 +130,10 @@ class AppState:
         """
         payload = {
             "model": asdict(self.model_config),
+            "ui": {
+                "left_ratio": self.left_ratio,
+                "right_ratio": self.right_ratio,
+            },
             "tools": {key: tool.enabled for key, tool in self.tools.items()},
             "active_session_id": self.active_session_id,
             "sessions": [
@@ -147,8 +175,24 @@ class AppState:
         Returns:
             新创建的 `ChatSession` 实例。
         """
-        session_index = len(self.sessions) + 1
-        session = ChatSession(title=title or f"Chat {session_index}")
+        if title is None:
+            used_indexes: set[int] = set()
+            for session in self.sessions:
+                raw_title = session.title.strip()
+                if not raw_title.startswith("Chat "):
+                    continue
+                suffix = raw_title[5:].strip()
+                if suffix.isdigit():
+                    used_indexes.add(int(suffix))
+
+            session_index = 1
+            while session_index in used_indexes:
+                session_index += 1
+            final_title = f"Chat {session_index}"
+        else:
+            final_title = title
+
+        session = ChatSession(title=final_title)
         self.sessions.append(session)
         self.active_session_id = session.session_id
         return session

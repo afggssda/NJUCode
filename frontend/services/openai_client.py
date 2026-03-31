@@ -20,8 +20,9 @@ class OpenAIRequest:
     base_url: str
     api_key: str
     model: str
-    message: str
+    messages: list[dict[str, str]]
     model_file: str = ""
+    file_contexts: list[tuple[str, str]] | None = None
 
 
 class OpenAICompatibleClient:
@@ -34,25 +35,35 @@ class OpenAICompatibleClient:
         self.last_request: OpenAIRequest | None = None
 
     def _build_messages(self, request: OpenAIRequest) -> list[dict[str, str]]:
-        """构造发送给模型接口的消息列表。
-
-        默认包含用户消息；若提供 `model_file`，
-        会读取文件前 4000 字符作为 system 上下文注入请求，
-        以实现“基于文件内容回答”的轻量模式。
-        """
-        messages: list[dict[str, str]] = [{"role": "user", "content": request.message}]
+        """构造发送给模型接口的消息列表。"""
+        # 复制外部通过传递得到的完整历史记录
+        messages: list[dict[str, str]] = list(request.messages)
+        
+        system_content = ""
+        
+        # 组装当前会话被额外 @ 引入的文件内容
+        if getattr(request, "file_contexts", None):
+            system_content += "会话中附带的文件上下文：\n"
+            for rel_path, content in request.file_contexts:
+                system_content += f"--- {rel_path} ---\n{content[:2000]}\n\n"
+                
+        # 组装全局指定的模型系统文件上下文
         if request.model_file.strip():
             file_path = Path(request.model_file).expanduser()
             if file_path.exists() and file_path.is_file():
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
-                snippet = content[:4000]
-                messages.insert(
-                    0,
-                    {
-                        "role": "system",
-                        "content": f"以下是用户指定文件内容（截断到4000字符）:\n{snippet}",
-                    },
-                )
+                system_content += f"配置的指定文件内容:\n{content[:4000]}\n\n"
+                
+        # 注入 system prompt
+        if system_content.strip():
+            messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": system_content.strip()
+                }
+            )
+            
         return messages
 
     def stream_chat(self, request: OpenAIRequest, stop_event: Event | None = None) -> Iterator[str]:

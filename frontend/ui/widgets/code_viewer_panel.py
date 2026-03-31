@@ -4,9 +4,19 @@ from pathlib import Path
 
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Label, TextArea
+from textual.message import Message
 
+class FileContextAdded(Message):
+    """请求将当前文件加入对话上下文的事件"""
+    def __init__(self, file_path: Path):
+        super().__init__()
+        self.file_path = file_path
 
 class CodeViewerPanel(Vertical):
+    BINDINGS = [
+        ("ctrl+s", "save_file", "Save File")
+    ]
+
     def __init__(self, **kwargs):
         """初始化代码查看/编辑面板。
 
@@ -49,6 +59,7 @@ class CodeViewerPanel(Vertical):
         with Horizontal(id="code_actions"):
             yield Button("Save", id="code_save_btn", variant="success", disabled=True)
             yield Button("Reload", id="code_reload_btn", disabled=True)
+            yield Button("Ask in Chat", id="code_ask_btn", variant="primary", disabled=True)
         yield TextArea.code_editor(
             "",
             id="code_editor",
@@ -105,6 +116,7 @@ class CodeViewerPanel(Vertical):
         editor = self.query_one("#code_editor", TextArea)
         save_btn = self.query_one("#code_save_btn", Button)
         reload_btn = self.query_one("#code_reload_btn", Button)
+        ask_btn = self.query_one("#code_ask_btn", Button)
 
         self.current_file_path = file_path
         title.update(f"Code Viewer - {file_path}")
@@ -157,22 +169,32 @@ class CodeViewerPanel(Vertical):
 
         save_btn.disabled = False
         reload_btn.disabled = False
+        ask_btn.disabled = False
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """处理代码面板操作按钮。
 
         - `Save`: 将编辑器内容写回当前文件。
         - `Reload`: 从磁盘重新加载当前文件内容。
+        - `Ask in Chat`: 将文件上下文发往聊天框。
 
         写入失败会以通知形式提示错误原因。
         """
         if event.button.id == "code_save_btn" and self.current_file_path:
+            self.action_save_file()
+            return
+        if event.button.id == "code_reload_btn" and self.current_file_path:
+            self.show_file(self.current_file_path)
+            return
+        if event.button.id == "code_ask_btn" and self.current_file_path:
+            self.post_message(FileContextAdded(self.current_file_path))
+
+    def action_save_file(self) -> None:
+        """保存当前文件内容。"""
+        if self.current_file_path:
             editor = self.query_one("#code_editor", TextArea)
             try:
                 self.current_file_path.write_text(editor.text, encoding="utf-8")
                 self.app.notify(f"已保存: {self.current_file_path}")
             except OSError as error:
                 self.app.notify(f"保存失败: {error}", severity="error")
-            return
-        if event.button.id == "code_reload_btn" and self.current_file_path:
-            self.show_file(self.current_file_path)

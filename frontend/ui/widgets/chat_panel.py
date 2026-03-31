@@ -3,7 +3,7 @@ from __future__ import annotations
 from textual import on
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Button, Input, Label, Static
+from textual.widgets import Button, Input, Label, Markdown, Static
 
 from ...models import ChatMessage
 
@@ -26,6 +26,61 @@ class StreamInterruptRequested(Message):
 
 
 class ChatPanel(Vertical):
+    def __init__(self, **kwargs):
+        """初始化聊天面板缓存。"""
+        super().__init__(**kwargs)
+        self._session_views: dict[str, Vertical] = {}
+        self._session_signatures: dict[str, tuple[tuple[str, str, str], ...]] = {}
+        self._active_session_id: str | None = None
+
+    def _build_bubble(self, bubble_role: str, content: str):
+        """按消息角色构建气泡组件。"""
+        if bubble_role == "user":
+            return Static(content, classes=f"chat-bubble bubble-{bubble_role}")
+        return Markdown(content, classes=f"chat-bubble bubble-{bubble_role}")
+
+    def _message_signature(self, messages: list[ChatMessage]) -> tuple[tuple[str, str, str], ...]:
+        """构建消息签名用于判断是否需要重绘。"""
+        return tuple((m.role, m.content, m.created_at.isoformat()) for m in messages)
+
+    def _ensure_session_view(self, session_id: str) -> Vertical:
+        """获取或创建指定会话的消息容器。"""
+        if session_id in self._session_views:
+            return self._session_views[session_id]
+
+        messages_view = self.query_one("#chat_messages", VerticalScroll)
+        view = Vertical(classes="chat-session-view")
+        self._session_views[session_id] = view
+        messages_view.mount(view)
+        return view
+
+    def _build_message_row(self, message: ChatMessage) -> Horizontal:
+        """将单条消息构建为行组件。"""
+        role = message.role.lower()
+        content = message.content or " "
+
+        if role == "user":
+            bubble_role = "user"
+        elif content.startswith("[系统错误]"):
+            bubble_role = "error"
+        elif content.startswith("[系统提示]"):
+            bubble_role = "system"
+        else:
+            bubble_role = "assistant"
+
+        bubble = self._build_bubble(bubble_role, content)
+        if bubble_role == "user":
+            return Horizontal(
+                Static("", classes="bubble-spacer"),
+                bubble,
+                classes=f"message-row row-{bubble_role}",
+            )
+        return Horizontal(
+            bubble,
+            Static("", classes="bubble-spacer"),
+            classes=f"message-row row-{bubble_role}",
+        )
+
     def compose(self):
         """构建聊天面板结构。
 
@@ -70,7 +125,18 @@ class ChatPanel(Vertical):
         input_widget.value = ""
         self.post_message(MessageSubmitted(text))
 
-    def render_messages(self, messages: list[ChatMessage]) -> None:
+    def append_to_input(self, text: str) -> None:
+        """在输入框追加文本，并自动获取焦点。
+        方便通过外部点击快速填入文件上下文标记。
+        """
+        input_widget = self.query_one("#chat_input", Input)
+        if input_widget.value and not input_widget.value.endswith(" "):
+            input_widget.value += " "
+        input_widget.value += text
+        input_widget.focus()
+        input_widget.cursor_position = len(input_widget.value)
+
+    def render_messages(self, messages: list[ChatMessage], session_id: str | None = None) -> None:
         """全量重绘消息列表。
 
         Args:
@@ -80,34 +146,21 @@ class ChatPanel(Vertical):
         最后自动滚动到底部，确保最新消息可见。
         """
         messages_view = self.query_one("#chat_messages", VerticalScroll)
-        for child in list(messages_view.children):
-            child.remove()
+        sid = session_id or "__default__"
+        target_view = self._ensure_session_view(sid)
+        signature = self._message_signature(messages)
 
-        for message in messages:
-            time_text = message.created_at.strftime("%H:%M:%S")
-            role = message.role.lower()
-            content = message.content or " "
+        if self._session_signatures.get(sid) != signature:
+            for child in list(target_view.children):
+                child.remove()
+            for message in messages:
+                target_view.mount(self._build_message_row(message))
+            self._session_signatures[sid] = signature
 
-            bubble_role = "user" if role == "user" else "assistant"
-            bubble = Static(
-                f"{content}\n[{time_text}]",
-                classes=f"chat-bubble bubble-{bubble_role}",
-            )
-            if bubble_role == "user":
-                row = Horizontal(
-                    Static("", classes="bubble-spacer"),
-                    bubble,
-                    classes=f"message-row row-{bubble_role}",
-                )
-            else:
-                row = Horizontal(
-                    bubble,
-                    Static("", classes="bubble-spacer"),
-                    classes=f"message-row row-{bubble_role}",
-                )
+        for current_sid, view in self._session_views.items():
+            view.display = current_sid == sid
 
-            messages_view.mount(row)
-
+        self._active_session_id = sid
         messages_view.scroll_end(animate=False)
 
     def update_last_message(self, message: ChatMessage) -> None:
@@ -120,20 +173,33 @@ class ChatPanel(Vertical):
         当结构不符合预期时会自动回退到安全的全量重绘。
         """
         messages_view = self.query_one("#chat_messages", VerticalScroll)
-        if not messages_view.children:
-            self.render_messages([message])
+        sid = self._active_session_id or "__default__"
+        active_view = self._session_views.get(sid)
+        if active_view is None:
+            self.render_messages([message], sid)
             return
 
-        last_row = messages_view.children[-1]
+        if not active_view.children:
+            active_view.mount(self._build_message_row(message))
+            messages_view.scroll_end(animate=False)
+            return
+
+        last_row = active_view.children[-1]
         if not isinstance(last_row, Horizontal):
-            self.render_messages([message])
+            self.render_messages([message], sid)
             return
 
         role = message.role.lower()
-        bubble_role = "user" if role == "user" else "assistant"
-        time_text = message.created_at.strftime("%H:%M:%S")
         content = message.content or " "
 
+        if role == "user":
+            bubble_role = "user"
+        elif content.startswith("[系统错误]"):
+            bubble_role = "error"
+        elif content.startswith("[系统提示]"):
+            bubble_role = "system"
+        else:
+            bubble_role = "assistant"
         bubble_widget = None
         if bubble_role == "user" and len(last_row.children) >= 2:
             bubble_widget = last_row.children[1]
@@ -141,9 +207,11 @@ class ChatPanel(Vertical):
             bubble_widget = last_row.children[0]
 
         if isinstance(bubble_widget, Static):
-            bubble_widget.update(f"{content}\n[{time_text}]")
+            bubble_widget.update(content)
+        elif isinstance(bubble_widget, Markdown):
+            bubble_widget.update(content)
         else:
-            self.render_messages([message])
+            self.render_messages([message], sid)
 
         messages_view.scroll_end(animate=False)
 

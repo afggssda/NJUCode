@@ -1,14 +1,123 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
-from textual import work
-from textual.containers import Vertical
-from textual.widgets import DirectoryTree, Label
+from textual import work, on
+from textual.app import ComposeResult
+from textual.containers import Vertical, Horizontal
+from textual.widgets import DirectoryTree, Label, Button, Input
+from textual.screen import ModalScreen
 from textual.widgets._tree import TreeNode
+from textual.message import Message
+
+
+class WorkspaceChanged(Message):
+    """工作区变更事件"""
+    def __init__(self, new_path: Path):
+        super().__init__()
+        self.new_path = new_path
+
+
+class OpenFolderScreen(ModalScreen[Path]):
+    """输入路径切换工作区的弹窗"""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="open_folder_dialog"):
+            yield Label("输入工作区绝对路径：", classes="dialog-title")
+            yield Input(placeholder="e.g. D:\\MyProject", id="folder_input")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("确认", id="folder_ok", variant="success")
+                yield Button("取消", id="folder_cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#folder_input", Input).focus()
+
+    @on(Button.Pressed, "#folder_cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#folder_ok")
+    def confirm(self) -> None:
+        self._submit()
+
+    @on(Input.Submitted, "#folder_input")
+    def input_submit(self) -> None:
+        self._submit()
+
+    def _submit(self) -> None:
+        val = self.query_one("#folder_input", Input).value.strip()
+        if val:
+            path = Path(val).resolve()
+            if path.is_dir():
+                self.dismiss(path)
+            else:
+                self.app.notify("无效的文件夹路径", severity="error")
+
+
+class NewFileScreen(ModalScreen[str]):
+    """输入需要创建的新文件/文件夹名称的弹窗"""
+    def __init__(self, directory: Path):
+        super().__init__()
+        self.directory = directory
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="open_folder_dialog"):
+            yield Label(f"在 {self.directory.name} 中新建：", classes="dialog-title")
+            yield Input(placeholder="e.g. new_file.py 或 new_folder/", id="new_file_input")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("确认", id="new_file_ok", variant="success")
+                yield Button("取消", id="new_file_cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#new_file_input", Input).focus()
+
+    @on(Button.Pressed, "#new_file_cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#new_file_ok")
+    def confirm(self) -> None:
+        self._submit()
+
+    @on(Input.Submitted, "#new_file_input")
+    def input_submit(self) -> None:
+        self._submit()
+
+    def _submit(self) -> None:
+        val = self.query_one("#new_file_input", Input).value.strip()
+        if val:
+            self.dismiss(val)
+
+
+class ConfirmDeleteFileScreen(ModalScreen[bool]):
+    """确认删除文件弹窗"""
+    def __init__(self, target: Path):
+        super().__init__()
+        self.target = target
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm_dialog"):
+            yield Label(f"确认要删除吗？\n\n{self.target.name}", id="confirm_title")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("取消", id="btn_cancel")
+                yield Button("删除", id="btn_confirm", variant="error")
+
+    @on(Button.Pressed, "#btn_cancel")
+    def cancel(self) -> None:
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#btn_confirm")
+    def confirm(self) -> None:
+        self.dismiss(True)
 
 
 class FileTreePanel(Vertical):
+    BINDINGS = [
+        ("n", "new_file", "New File/Dir"),
+        ("delete", "delete_file", "Delete"),
+    ]
+
     def __init__(self, workspace_root: Path, **kwargs):
         """初始化文件树面板。
 
@@ -23,8 +132,79 @@ class FileTreePanel(Vertical):
 
     def compose(self):
         """构建 Explorer 面板组件。"""
-        yield Label("Explorer", classes="panel-title")
+        with Horizontal(id="explorer_title_row"):
+            yield Label("Explorer", classes="panel-title")
+            yield Button("Open Folder", id="btn_open_folder", variant="primary", classes="small_btn")
         yield DirectoryTree(str(self.workspace_root), id="workspace_tree")
+
+    @on(Button.Pressed, "#btn_open_folder")
+    def on_open_folder(self) -> None:
+        def check_reply(new_path: Path | None) -> None:
+            if new_path:
+                self.workspace_root = new_path
+                tree = self.query_one("#workspace_tree", DirectoryTree)
+                tree.path = str(new_path)
+                self.post_message(WorkspaceChanged(new_path))
+                self.app.notify(f"已切换工作区: {new_path}")
+        self.app.push_screen(OpenFolderScreen(), check_reply)
+
+    def action_new_file(self) -> None:
+        """在新选中的目录下或同级新建文件/文件夹。"""
+        tree = self.query_one("#workspace_tree", DirectoryTree)
+        node = tree.cursor_node
+        if node is None:
+            target_dir = self.workspace_root
+        else:
+            data = getattr(node, "data", None)
+            path = getattr(data, "path", None)
+            if path is None:
+                target_dir = self.workspace_root
+            elif path.is_dir():
+                target_dir = path
+            else:
+                target_dir = path.parent
+
+        def check_reply(name: str | None) -> None:
+            if name:
+                new_path = target_dir / name
+                try:
+                    if name.endswith("/") or name.endswith("\\"):
+                        new_path.mkdir(parents=True, exist_ok=True)
+                    else:
+                        new_path.parent.mkdir(parents=True, exist_ok=True)
+                        new_path.touch(exist_ok=True)
+                    self._refresh_tree()
+                    self.app.notify(f"已创建: {new_path.name}")
+                except Exception as e:
+                    self.app.notify(f"创建失败: {e}", severity="error")
+
+        self.app.push_screen(NewFileScreen(target_dir), check_reply)
+
+    def action_delete_file(self) -> None:
+        """删除当前选中的文件/文件夹。"""
+        tree = self.query_one("#workspace_tree", DirectoryTree)
+        node = tree.cursor_node
+        if node is None:
+            return
+            
+        data = getattr(node, "data", None)
+        path = getattr(data, "path", None)
+        if path is None or path == self.workspace_root:
+            return
+
+        def check_reply(confirm: bool) -> None:
+            if confirm:
+                try:
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+                    self._refresh_tree()
+                    self.app.notify(f"已删除: {path.name}")
+                except Exception as e:
+                    self.app.notify(f"删除失败: {e}", severity="error")
+
+        self.app.push_screen(ConfirmDeleteFileScreen(path), check_reply)
 
     def on_mount(self) -> None:
         """组件挂载后启动周期刷新定时器。

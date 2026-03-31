@@ -18,6 +18,13 @@ class SplitterDragged(Message):
         super().__init__()
 
 
+class SplitterDragEnded(Message):
+    def __init__(self, splitter_id: str) -> None:
+        """创建分割条拖拽结束事件。"""
+        self.splitter_id = splitter_id
+        super().__init__()
+
+
 class VerticalSplitter(Static):
     def __init__(self, splitter_id: str, **kwargs):
         """初始化竖向分割条组件。
@@ -42,6 +49,7 @@ class VerticalSplitter(Static):
         if self._dragging:
             self._dragging = False
             self.release_mouse()
+            self.post_message(SplitterDragEnded(self.splitter_id))
             event.stop()
 
     def on_mouse_move(self, event: events.MouseMove) -> None:

@@ -31,8 +31,8 @@ Button.-error {
 }
 
 #left_tabs {
-  width: 22%;
-  min-width: 28;
+  width: 24%;
+  min-width: 32;
   border: round $primary;
 }
 
@@ -50,10 +50,15 @@ Button.-error {
 
 #splitter_left,
 #splitter_right {
-  width: 2;
-  min-width: 2;
-  background: $panel-darken-1;
-  border: round $panel-darken-1;
+  width: 1;
+  min-width: 1;
+  background: $panel;
+  content-align: center middle;
+}
+
+#splitter_left:hover,
+#splitter_right:hover {
+  background: $primary;
 }
 
 .panel-title {
@@ -69,6 +74,12 @@ Button.-error {
 #chat_messages {
   height: 1fr;
   border: round $surface;
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+.chat-session-view {
+  height: auto;
 }
 
 #code_actions {
@@ -98,7 +109,7 @@ Button.-error {
   width: 1fr;
   height: auto;
   layout: horizontal;
-  padding: 0 1;
+  padding: 0 1 1 1;
 }
 
 .bubble-spacer {
@@ -106,8 +117,11 @@ Button.-error {
 }
 
 .chat-bubble {
-  max-width: 80%;
-  padding: 1 2;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  min-height: 1;
+  padding: 0 1;
   border: round $panel;
 }
 
@@ -115,11 +129,51 @@ Button.-error {
   background: #7fb7e6;
   color: #0f1720;
   border: round #7fb7e6;
+  max-width: 78%;
 }
 
 .bubble-assistant {
   background: $background;
   color: $text;
+}
+
+.bubble-system {
+  background: $background;
+  color: $success;
+}
+
+.bubble-error {
+  background: $background;
+  color: $warning;
+}
+
+Markdown.chat-bubble {
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Remove default heading underline inside Markdown replies for cleaner chat bubbles. */
+Markdown.chat-bubble .markdown--h1,
+Markdown.chat-bubble .markdown--h2,
+Markdown.chat-bubble .markdown--h3,
+Markdown.chat-bubble .markdown--h4,
+Markdown.chat-bubble .markdown--h5,
+Markdown.chat-bubble .markdown--h6 {
+  border: none;
+  text-style: bold;
+}
+
+/* Keep markdown tables styled while allowing horizontal scrolling instead of truncation. */
+MarkdownTable {
+  width: auto;
+  overflow-x: auto;
+}
+
+DataTable {
+  width: auto;
+  overflow-x: auto;
 }
 
 #chat_status {
@@ -163,7 +217,7 @@ Button.-error {
 
 #session_action_row Button {
   width: 1fr;
-  min-width: 8;
+  min-width: 12;
 }
 
 #delete_session_btn {
@@ -173,4 +227,84 @@ Button.-error {
 .tool-label {
   padding: 0 1;
   color: $text;
+}
+
+#status_row {
+  height: 1;
+  layout: horizontal;
+  padding: 0 1;
+  content-align: left middle;
+}
+
+#status_bar {
+  width: 1fr;
+  content-align: left middle;
+}
+
+#confirm_dialog {
+  width: 60%;
+  max-width: 60;
+  padding: 1 2;
+  border: round $warning;
+  background: $panel;
+  align: center middle;
+}
+
+#confirm_title {
+  text-style: bold;
+  padding-bottom: 1;
+}
+
+#confirm_message {
+  padding-bottom: 1;
+  color: $text-muted;
+}
+
+#confirm_actions {
+  layout: horizontal;
+  height: auto;
+}
+
+#confirm_actions Button {
+  width: 1fr;
+}
+
+#confirm_ok {
+  margin-left: 1;
+}
+
+/* Directory Tree Open Folder */
+#explorer_title_row {
+  height: auto;
+  layout: horizontal;
+  align: left middle;
+}
+#explorer_title_row Label {
+  width: 1fr;
+}
+#btn_open_folder {
+  min-width: 12;
+  margin-right: 1;
+}
+
+#open_folder_dialog {
+  width: 60%;
+  max-width: 60;
+  height: auto;
+  padding: 1 2;
+  border: round $primary;
+  background: $panel;
+}
+.dialog-title {
+  text-style: bold;
+  height: 3;
+}
+.dialog-buttons {
+  height: auto;
+  margin-top: 1;
+  align: right middle;
+  layout: horizontal;
+}
+.dialog-buttons Button {
+  margin-left: 1;
 }

@@ -1,23 +1,25 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+import sys
 from threading import Event
 
 from dotenv import load_dotenv
-from textual import work
+from textual import work, on
 from textual.app import App
 from textual.containers import Horizontal
-from textual.widgets import DirectoryTree, Footer, Header, TabPane, TabbedContent
+from textual.widgets import DirectoryTree, Footer, Header, Label, TabPane, TabbedContent
 from textual.widgets import TextArea
 
 from .services.openai_client import OpenAICompatibleClient, OpenAIRequest
 from .services.runtime_tools import run_hello_world
 from .state import AppState
 from .ui.widgets.chat_panel import ChatPanel, MessageSubmitted, StreamInterruptRequested
-from .ui.widgets.code_viewer_panel import CodeViewerPanel
+from .ui.widgets.code_viewer_panel import CodeViewerPanel, FileContextAdded
 from .ui.widgets.config_panel import ConfigPanel, ConfigSaved, MirrorSelected
-from .ui.widgets.file_tree_panel import FileTreePanel
+from .ui.widgets.file_tree_panel import FileTreePanel, WorkspaceChanged
 from .ui.widgets.session_panel import (
     SessionCreateRequested,
     SessionDeleteRequested,
@@ -25,7 +27,7 @@ from .ui.widgets.session_panel import (
     SessionRenameRequested,
     SessionSelected,
 )
-from .ui.widgets.splitter import SplitterDragged, VerticalSplitter
+from .ui.widgets.splitter import SplitterDragEnded, SplitterDragged, VerticalSplitter
 from .ui.widgets.tools_panel import HelloWorldRequested, ToolToggled, ToolsPanel
 
 
@@ -36,6 +38,7 @@ class NjuCodeApp(App):
 
     BINDINGS = [
         ("ctrl+n", "new_chat", "New Chat"),
+        ("ctrl+h", "toggle_chat", "Show/Hide Chat"),
         ("ctrl+c", "interrupt_stream", "Interrupt"),
         ("ctrl+q", "quit", "Quit"),
     ]
@@ -55,8 +58,16 @@ class NjuCodeApp(App):
         self.stream_cancel_event: Event | None = None
         self.stream_session_id: str | None = None
         self.stream_active = False
-        self.left_ratio = 0.22
-        self.right_ratio = 0.30
+        self.left_ratio = self.state.left_ratio
+        self.right_ratio = self.state.right_ratio
+        self.default_chat_ratio = 0.34
+        self.min_center_ratio = 0.20
+        self.left_show_ratio = 0.12
+        self.left_hide_ratio = 0.10
+        self.right_show_ratio = 0.14
+        self.right_hide_ratio = 0.12
+        self.left_visible = self.left_ratio >= self.left_show_ratio
+        self.right_visible = self.right_ratio >= self.right_show_ratio
 
     def compose(self):
         """声明并构建主界面组件树。
@@ -73,17 +84,19 @@ class NjuCodeApp(App):
                 with TabPane("Chats", id="chats"):
                     yield SessionPanel(id="session_panel")
             yield VerticalSplitter(splitter_id="left", id="splitter_left")
-            with TabbedContent(initial="chat", id="center_tabs"):
-                with TabPane("Chat", id="chat"):
-                    yield ChatPanel(id="chat_panel")
-            yield VerticalSplitter(splitter_id="right", id="splitter_right")
-            with TabbedContent(initial="tools", id="right_tabs"):
+            with TabbedContent(initial="code", id="center_tabs"):
                 with TabPane("Code", id="code"):
                     yield CodeViewerPanel(id="code_view")
                 with TabPane("Tools", id="tools"):
                     yield ToolsPanel(id="tools_panel")
                 with TabPane("Model", id="model"):
                     yield ConfigPanel(id="config_panel")
+            yield VerticalSplitter(splitter_id="right", id="splitter_right")
+            with TabbedContent(initial="chat", id="right_tabs"):
+                with TabPane("Chat", id="chat"):
+                    yield ChatPanel(id="chat_panel")
+        with Horizontal(id="status_row"):
+            yield Label("", id="status_bar")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -94,9 +107,46 @@ class NjuCodeApp(App):
         该方法确保用户打开程序时看到的是可直接交互的稳定界面。
         """
         self.state.load()
+        self.left_ratio = self.state.left_ratio
+        self.right_ratio = self.state.right_ratio
+        self.left_visible = self.left_ratio >= self.left_show_ratio
+        self.right_visible = self.right_ratio >= self.right_show_ratio
+        max_side_total = 1.0 - self.min_center_ratio
+        side_total = self.left_ratio + self.right_ratio
+        if side_total > max_side_total and side_total > 0:
+            scale = max_side_total / side_total
+            self.left_ratio *= scale
+            self.right_ratio *= scale
         self.refresh_ui()
         self._diagnose_syntax_highlighting()
         self._apply_pane_widths()
+        self._update_status_bar()
+        self.notify("可拖拽中间两条竖线调节左侧目录与右侧聊天宽度。")
+
+    def _detect_git_branch(self) -> str:
+        """尝试读取当前工作区 git 分支名。"""
+        head_file = self.state.workspace_root / ".git" / "HEAD"
+        if not head_file.exists():
+            return "no-git"
+        try:
+            head = head_file.read_text(encoding="utf-8", errors="ignore").strip()
+        except OSError:
+            return "no-git"
+        prefix = "ref: refs/heads/"
+        if head.startswith(prefix):
+            return head.replace(prefix, "", 1)
+        return head[:7] if head else "detached"
+
+    def _update_status_bar(self) -> None:
+        """更新底部状态栏信息。"""
+        branch = self._detect_git_branch()
+        python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        model_name = self.state.model_config.model or "n/a"
+        mirror = self.state.model_config.mirror or "custom"
+        status = (
+            f"Branch: {branch} | Python: {python_version} | Mirror: {mirror} | Model: {model_name}"
+        )
+        self.query_one("#status_bar", Label).update(status)
 
     def _clamp(self, value: float, low: float, high: float) -> float:
         """将数值限制在指定闭区间内。
@@ -118,21 +168,83 @@ class NjuCodeApp(App):
         然后将比例转换为百分比并写入对应栏位样式。
         该逻辑用于启动初始化与拖拽分割条后的实时更新。
         """
-        total = self.left_ratio + self.right_ratio
-        if total > 0.90:
-            scale = 0.90 / total
-            self.left_ratio *= scale
-            self.right_ratio *= scale
-        center_ratio = 1.0 - self.left_ratio - self.right_ratio
-        if center_ratio < 0.10:
-            center_ratio = 0.10
+        if self.left_visible and self.left_ratio < self.left_hide_ratio:
+            self.left_visible = False
+        elif not self.left_visible and self.left_ratio >= self.left_show_ratio:
+            self.left_visible = True
+
+        if self.right_visible and self.right_ratio < self.right_hide_ratio:
+            self.right_visible = False
+        elif not self.right_visible and self.right_ratio >= self.right_show_ratio:
+            self.right_visible = True
+
+        left_hidden = not self.left_visible
+        right_hidden = not self.right_visible
+
+        effective_left = 0.0 if left_hidden else self.left_ratio
+        effective_right = 0.0 if right_hidden else self.right_ratio
+
+        center_ratio = 1.0 - effective_left - effective_right
+        if center_ratio < self.min_center_ratio:
+            center_ratio = self.min_center_ratio
 
         left_tabs = self.query_one("#left_tabs", TabbedContent)
         center_tabs = self.query_one("#center_tabs", TabbedContent)
         right_tabs = self.query_one("#right_tabs", TabbedContent)
-        left_tabs.styles.width = f"{self.left_ratio * 100:.2f}%"
+        splitter_left = self.query_one("#splitter_left", VerticalSplitter)
+        splitter_right = self.query_one("#splitter_right", VerticalSplitter)
+
+        left_tabs.display = not left_hidden
+        right_tabs.display = not right_hidden
+        splitter_left.display = True
+        splitter_right.display = True
+
+        if left_hidden:
+            splitter_left.styles.width = 2
+            splitter_left.styles.min_width = 2
+            splitter_left.update("<")
+        else:
+            splitter_left.styles.width = 1
+            splitter_left.styles.min_width = 1
+            splitter_left.update("")
+
+        if right_hidden:
+            splitter_right.styles.width = 2
+            splitter_right.styles.min_width = 2
+            splitter_right.update(">")
+        else:
+            splitter_right.styles.width = 1
+            splitter_right.styles.min_width = 1
+            splitter_right.update("")
+
+        left_tabs.styles.width = f"{effective_left * 100:.2f}%"
         center_tabs.styles.width = f"{center_ratio * 100:.2f}%"
-        right_tabs.styles.width = f"{self.right_ratio * 100:.2f}%"
+        right_tabs.styles.width = f"{effective_right * 100:.2f}%"
+
+    def _toggle_chat_panel(self) -> None:
+        """切换右侧聊天栏显示状态。"""
+        if self.right_visible:
+            self.right_ratio = 0.0
+            self.right_visible = False
+        else:
+            # Expand chat to a stable default width while preserving center minimum width.
+            max_right = 1.0 - self.left_ratio - self.min_center_ratio
+            if max_right < self.right_show_ratio:
+                self.left_ratio = max(0.0, 1.0 - self.min_center_ratio - self.default_chat_ratio)
+                max_right = 1.0 - self.left_ratio - self.min_center_ratio
+
+            target = min(self.default_chat_ratio, max_right)
+            self.right_ratio = max(self.right_show_ratio, target)
+            self.right_visible = True
+
+        self._apply_pane_widths()
+        self.state.left_ratio = self.left_ratio
+        self.state.right_ratio = self.right_ratio
+        self.state.save()
+
+    def action_toggle_chat(self) -> None:
+        """快捷键动作：显示或隐藏右侧聊天栏。"""
+        self._toggle_chat_panel()
 
     def on_splitter_dragged(self, message: SplitterDragged) -> None:
         """处理分割条拖拽事件并更新布局比例。
@@ -142,20 +254,24 @@ class NjuCodeApp(App):
         计算完成后会立即触发 `_apply_pane_widths` 刷新界面。
         """
         total_width = max(self.size.width, 80)
-        min_left = 28 / total_width
-        min_center = 30 / total_width
-        min_right = 36 / total_width
+        min_center = self.min_center_ratio
 
         x = self._clamp(message.screen_x / total_width, 0.0, 1.0)
         if message.splitter_id == "left":
             max_left = 1.0 - self.right_ratio - min_center
-            self.left_ratio = self._clamp(x, min_left, max_left)
+            self.left_ratio = self._clamp(x, 0.0, max_left)
         elif message.splitter_id == "right":
             proposed_right = 1.0 - x
             max_right = 1.0 - self.left_ratio - min_center
-            self.right_ratio = self._clamp(proposed_right, min_right, max_right)
+            self.right_ratio = self._clamp(proposed_right, 0.0, max_right)
 
         self._apply_pane_widths()
+
+    def on_splitter_drag_ended(self, _: SplitterDragEnded) -> None:
+        """拖拽结束后保存最新分栏比例。"""
+        self.state.left_ratio = self.left_ratio
+        self.state.right_ratio = self.right_ratio
+        self.state.save()
 
     def _diagnose_syntax_highlighting(self) -> None:
         """检查常见语言语法高亮可用性并给出提示。
@@ -204,11 +320,21 @@ class NjuCodeApp(App):
         config_panel = self.query_one("#config_panel", ConfigPanel)
 
         session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
-        chat_panel.render_messages(self.state.active_session.messages)
+        chat_panel.render_messages(self.state.active_session.messages, self.state.active_session_id)
         if not self.stream_active:
             chat_panel.set_busy(False, "Idle")
         tools_panel.refresh_tools(list(self.state.tools.values()))
         config_panel.load_config(self.state.model_config)
+        self._update_status_bar()
+
+    def _refresh_active_chat_view(self) -> None:
+        """仅刷新当前会话相关视图，减少切换会话时的闪烁。"""
+        session_panel = self.query_one("#session_panel", SessionPanel)
+        chat_panel = self.query_one("#chat_panel", ChatPanel)
+        session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
+        chat_panel.render_messages(self.state.active_session.messages, self.state.active_session_id)
+        if not self.stream_active:
+            chat_panel.set_busy(False, "Idle")
 
     def on_session_create_requested(self, _: SessionCreateRequested) -> None:
         """响应新建会话请求。
@@ -228,7 +354,7 @@ class NjuCodeApp(App):
         """
         self.state.switch_session(message.session_id)
         self.state.save()
-        self.refresh_ui()
+        self._refresh_active_chat_view()
 
     def on_session_rename_requested(self, message: SessionRenameRequested) -> None:
         """响应会话重命名请求。
@@ -265,25 +391,63 @@ class NjuCodeApp(App):
         self.state.append_message("user", message.content)
         self.state.append_message("assistant", "")
         self.state.save()
-        self.query_one("#chat_panel", ChatPanel).render_messages(self.state.active_session.messages)
+        self.query_one("#chat_panel", ChatPanel).render_messages(
+            self.state.active_session.messages, self.state.active_session_id
+        )
 
         self.stream_active = True
         self.stream_session_id = session_id
         self.stream_cancel_event = Event()
         self.query_one("#chat_panel", ChatPanel).set_busy(True, "正在等待模型响应...")
 
+        file_contexts = []
+        if self.state.workspace_root:
+            workspace_path = Path(self.state.workspace_root)
+            for m in re.finditer(r'@([\w\./\\-]+)', message.content):
+                rel_path = m.group(1)
+                full_path = workspace_path / rel_path
+                if full_path.exists() and full_path.is_file():
+                    try:
+                        content = full_path.read_text(encoding="utf-8", errors="ignore")
+                        file_contexts.append((str(rel_path), content))
+                    except Exception:
+                        pass
+
+        # 构建完整的上下文历史传递（排除最后一条临时占位的 assistant）
+        history_msgs = self.state.active_session.messages[:-1]
+        request_messages = [{"role": m.role, "content": m.content} for m in history_msgs]
+
         request = OpenAIRequest(
             base_url=self.state.model_config.base_url,
             api_key=self.state.model_config.api_key,
             model=self.state.model_config.model,
-            message=message.content,
+            messages=request_messages,
             model_file=self.state.model_config.model_file,
+            file_contexts=file_contexts,
         )
         self._stream_assistant_reply(request, session_id, self.stream_cancel_event)
 
     def on_stream_interrupt_requested(self, _: StreamInterruptRequested) -> None:
         """响应聊天面板的中断请求事件。"""
         self.action_interrupt_stream()
+
+    @on(WorkspaceChanged)
+    def on_workspace_changed(self, event: WorkspaceChanged) -> None:
+        """处理工作区变更事件。"""
+        self.state.workspace_root = event.new_path
+        self.state.save()
+
+    @on(FileContextAdded)
+    def on_file_context_added(self, event: FileContextAdded) -> None:
+        """从代码视图中把文件快捷加入聊天对话框的上下文。"""
+        # 将绝对路径转为相对于工作区的相对路径（如果可能）
+        try:
+            rel_path = Path(event.file_path).relative_to(self.state.workspace_root)
+        except ValueError:
+            rel_path = event.file_path
+        
+        chat_panel = self.query_one("#chat_panel", ChatPanel)
+        chat_panel.append_to_input(f"@{rel_path} ")
 
     def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
         """处理文件树文件选择事件。
@@ -300,7 +464,7 @@ class NjuCodeApp(App):
         except Exception as error:
             self.notify(f"打开文件失败: {error}", severity="error")
             return
-        self.query_one("#right_tabs", TabbedContent).active = "code"
+        self.query_one("#center_tabs", TabbedContent).active = "code"
 
     def on_tool_toggled(self, message: ToolToggled) -> None:
         """处理工具权限开关变更并持久化。"""
@@ -316,7 +480,9 @@ class NjuCodeApp(App):
         result = run_hello_world(self.state.workspace_root)
         self.state.append_message("assistant", result)
         self.state.save()
-        self.query_one("#chat_panel", ChatPanel).render_messages(self.state.active_session.messages)
+        self.query_one("#chat_panel", ChatPanel).render_messages(
+            self.state.active_session.messages, self.state.active_session_id
+        )
         self.notify(result)
 
     def on_mirror_selected(self, message: MirrorSelected) -> None:
@@ -339,6 +505,7 @@ class NjuCodeApp(App):
         self.state.model_config.model = message.model or self.state.model_config.model
         self.state.model_config.model_file = message.model_file
         self.state.save()
+        self._update_status_bar()
         self.notify("配置已保存到 .nju_code/settings.json")
 
     def action_new_chat(self) -> None:
@@ -369,7 +536,7 @@ class NjuCodeApp(App):
                 return
             session.messages[-1].content += chunk
             if self.state.active_session_id == session_id:
-                self.query_one("#chat_panel", ChatPanel).render_messages(session.messages)
+                self.query_one("#chat_panel", ChatPanel).update_last_message(session.messages[-1])
             return
 
     def _finish_stream(self, session_id: str, cancelled: bool, error_message: str | None) -> None:
@@ -399,7 +566,7 @@ class NjuCodeApp(App):
 
         if self.state.active_session_id == session_id and target_session is not None:
             chat_panel = self.query_one("#chat_panel", ChatPanel)
-            chat_panel.render_messages(target_session.messages)
+            chat_panel.render_messages(target_session.messages, session_id)
             chat_panel.set_busy(False, "Idle")
         self.state.save()
 

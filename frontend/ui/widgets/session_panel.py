@@ -5,6 +5,7 @@ from typing import Iterable
 from textual import on
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
+from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, ListItem, ListView
 
 from ...models import ChatSession
@@ -47,6 +48,33 @@ class SessionDeleteRequested(Message):
         """
         self.session_id = session_id
         super().__init__()
+
+
+class ConfirmDeleteScreen(ModalScreen[bool]):
+    def __init__(self, title: str, message: str) -> None:
+        """初始化确认弹窗内容。"""
+        super().__init__()
+        self.title = title
+        self.message = message
+
+    def compose(self):
+        """渲染确认弹窗的主体内容与按钮。"""
+        with Vertical(id="confirm_dialog"):
+            yield Label(self.title, id="confirm_title")
+            yield Label(self.message, id="confirm_message")
+            with Horizontal(id="confirm_actions"):
+                yield Button("取消", id="confirm_cancel")
+                yield Button("删除", id="confirm_ok", variant="error")
+
+    @on(Button.Pressed, "#confirm_ok")
+    def on_confirm(self) -> None:
+        """用户确认删除。"""
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#confirm_cancel")
+    def on_cancel(self) -> None:
+        """用户取消删除。"""
+        self.dismiss(False)
 
 
 class SessionPanel(Vertical):
@@ -113,20 +141,25 @@ class SessionPanel(Vertical):
 
     @on(Button.Pressed, "#delete_session_btn")
     def on_delete_clicked(self) -> None:
-        """处理删除按钮点击并执行二次确认流程。
-
-        第一次点击将按钮文案改为 Confirm，
-        再次点击同一会话才会真正发送删除事件。
-        """
+        """处理删除按钮点击并弹出确认框。"""
         if not self.selected_session_id:
             return
-        if self.delete_confirm_session_id != self.selected_session_id:
-            self.delete_confirm_session_id = self.selected_session_id
-            self.query_one("#delete_session_btn", Button).label = "Confirm"
-            return
-        self.delete_confirm_session_id = None
-        self._reset_delete_button()
-        self.post_message(SessionDeleteRequested(self.selected_session_id))
+        target_session_id = self.selected_session_id
+        self.delete_confirm_session_id = target_session_id
+
+        def handle_confirm(confirmed: bool) -> None:
+            if not confirmed:
+                self.delete_confirm_session_id = None
+                return
+            if self.delete_confirm_session_id != target_session_id:
+                return
+            self.delete_confirm_session_id = None
+            self.post_message(SessionDeleteRequested(target_session_id))
+
+        self.app.push_screen(
+            ConfirmDeleteScreen("确认删除", "确定要删除该会话吗？"),
+            handle_confirm,
+        )
 
     def _reset_delete_button(self) -> None:
         """将删除按钮文案恢复为默认值。"""

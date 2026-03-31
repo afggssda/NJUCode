@@ -30,11 +30,11 @@ class ToolToggle:
 
 @dataclass
 class ModelConfig:
-    base_url: str = "https://api-inference.modelscope.cn/v1"
+    base_url: str = "https://api.atlascloud.ai/v1"
     api_key: str = ""
-    model: str = "Qwen/Qwen3.5-35B-A3B"
+    model: str = "deepseek-v3"
     model_file: str = ""
-    mirror: str = "modelscope"
+    mirror: str = "atlascloud"
 
 
 DEFAULT_TOOLS: List[ToolToggle] = [
@@ -46,6 +46,7 @@ DEFAULT_TOOLS: List[ToolToggle] = [
 ]
 
 MIRROR_PRESETS: Dict[str, str] = {
+    "atlascloud": "https://api.atlascloud.ai/v1",
     "modelscope": "https://api-inference.modelscope.cn/v1",
     "official": "https://api.openai.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
