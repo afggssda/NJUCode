@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Label, TextArea
+from textual.widgets import Button, Label, Static, TextArea
 from textual.message import Message
 
 class FileContextAdded(Message):
@@ -60,6 +60,18 @@ class CodeViewerPanel(Vertical):
             yield Button("Save", id="code_save_btn", variant="success", disabled=True)
             yield Button("Reload", id="code_reload_btn", disabled=True)
             yield Button("Ask in Chat", id="code_ask_btn", variant="primary", disabled=True)
+        yield Static(
+            """
+█   █     ██████   █   █
+██  █       ██     █   █
+█ █ █       ██     █   █
+█  ██    █  ██     █   █
+█   █     ███       ███
+
+从左侧 Explorer 选择一个文件开始编辑
+            """.strip("\n"),
+            id="code_empty_state",
+        )
         yield TextArea.code_editor(
             "",
             id="code_editor",
@@ -68,6 +80,15 @@ class CodeViewerPanel(Vertical):
             show_line_numbers=True,
             highlight_cursor_line=True,
         )
+
+    def on_mount(self) -> None:
+        """挂载后进入空态：显示图标占位，不显示代码框。"""
+        self._set_empty_state(True)
+
+    def _set_empty_state(self, empty: bool) -> None:
+        """切换空态与编辑态显示。"""
+        self.query_one("#code_empty_state", Static).display = empty
+        self.query_one("#code_editor", TextArea).display = not empty
 
     def _guess_language(self, file_path: Path) -> str:
         """根据文件扩展名推断语法高亮语言。
@@ -167,6 +188,7 @@ class CodeViewerPanel(Vertical):
                 )
                 self._missing_language_warned = True
 
+            self._set_empty_state(False)
         save_btn.disabled = False
         reload_btn.disabled = False
         ask_btn.disabled = False

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from textual import on
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.widgets import Button, Label, Switch
+from textual.widgets import Button, Input, Label, Switch
 
 from ...models import ToolToggle
 
@@ -26,6 +26,12 @@ class HelloWorldRequested(Message):
     pass
 
 
+class AnalysisCommandRequested(Message):
+    def __init__(self, command: str) -> None:
+        self.command = command
+        super().__init__()
+
+
 class ToolsPanel(Vertical):
     def compose(self):
         """构建工具权限面板。
@@ -35,6 +41,22 @@ class ToolsPanel(Vertical):
         """
         yield Label("Tool Permissions", classes="panel-title")
         yield Button("Run Hello World", id="run_hello_btn", variant="primary")
+        yield Label("Analysis Workbench", classes="panel-title")
+        yield Input(placeholder="检索关键字/需求描述/符号名", id="analysis_query_input")
+        yield Input(placeholder="文件相对路径 (e.g. frontend/app.py)", id="analysis_path_input")
+        with Horizontal():
+            yield Input(placeholder="depth (1-2)", id="analysis_depth_input", value="2")
+            yield Input(placeholder="top_k", id="analysis_top_input", value="10")
+        with Horizontal():
+            yield Button("Help", id="analysis_help_btn")
+            yield Button("Scan", id="analysis_scan_btn", variant="primary")
+            yield Button("Search", id="analysis_search_btn", variant="success")
+            yield Button("Symbol", id="analysis_symbol_btn")
+        with Horizontal():
+            yield Button("Summary", id="analysis_summary_btn")
+            yield Button("Deps", id="analysis_deps_btn")
+            yield Button("Recall", id="analysis_recall_btn")
+            yield Button("Impact", id="analysis_impact_btn", variant="warning")
 
     def refresh_tools(self, tools: list[ToolToggle]) -> None:
         """根据工具列表创建或更新开关组件。
@@ -65,6 +87,53 @@ class ToolsPanel(Vertical):
     def on_run_hello_pressed(self) -> None:
         """处理示例工具按钮点击并发出执行请求。"""
         self.post_message(HelloWorldRequested())
+
+    def _analysis_command_from_button(self, button_id: str) -> str | None:
+        query = self.query_one("#analysis_query_input", Input).value.strip()
+        path = self.query_one("#analysis_path_input", Input).value.strip()
+        depth_raw = self.query_one("#analysis_depth_input", Input).value.strip() or "2"
+        top_raw = self.query_one("#analysis_top_input", Input).value.strip() or "10"
+
+        try:
+            depth = max(1, min(2, int(depth_raw)))
+        except ValueError:
+            depth = 2
+
+        try:
+            top_k = max(1, min(30, int(top_raw)))
+        except ValueError:
+            top_k = 10
+
+        if button_id == "analysis_help_btn":
+            return "/help"
+        if button_id == "analysis_scan_btn":
+            return "/scan"
+        if button_id == "analysis_search_btn":
+            return f"/search {query}" if query else None
+        if button_id == "analysis_symbol_btn":
+            return f"/symbol {query}" if query else None
+        if button_id == "analysis_summary_btn":
+            return f"/summary {path}" if path else None
+        if button_id == "analysis_deps_btn":
+            return f"/deps {path} --depth {depth}" if path else None
+        if button_id == "analysis_recall_btn":
+            return f"/recall {query} --top {top_k}" if query else None
+        if button_id == "analysis_impact_btn":
+            target = query or path
+            return f"/impact {target} --depth {depth}" if target else None
+        return None
+
+    @on(Button.Pressed)
+    def on_analysis_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if not button_id.startswith("analysis_"):
+            return
+
+        command = self._analysis_command_from_button(button_id)
+        if not command:
+            self.app.notify("请先填写必需参数（query/path）。", severity="warning")
+            return
+        self.post_message(AnalysisCommandRequested(command))
 
     @on(Switch.Changed)
     def on_switch_changed(self, event: Switch.Changed) -> None:

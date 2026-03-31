@@ -93,6 +93,15 @@ Button.-error {
   border: round $surface;
 }
 
+#code_empty_state {
+  height: 1fr;
+  border: round $surface;
+  content-align: center middle;
+  color: $text-muted;
+  padding: 1 2;
+  text-style: bold;
+}
+
 #chat_input_row {
   height: auto;
   layout: horizontal;

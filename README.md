@@ -1,129 +1,140 @@
-# nju_code 前端（Textual）
+# NJUCode
 
-这是一个 **Claude Code 风格的 Python 终端前端 MVP**，专注于你要求的基础能力：
-- Chat 界面（支持多会话切换）
-- 可查看文件代码
-- 类 VSCode 的文件树
-- 工具权限开关
-- OpenAI 兼容模型配置（默认 ModelScope，可切换镜像源、可指定模型文件路径）
+`NJUCode` 是一个基于 Textual 的终端代码助手原型。项目正在从“聊天壳”逐步演进为可检索、可分析、可安全修改代码的 Code Agent。
 
-开发目录：`/mnt/c/Files/nju_code`
+## 当前进度
+- 已完成：WBS-1（项目初始化）、WBS-2（CLI 与会话系统）
+- 基本完成：WBS-3（上下文分析与检索，含检索工作台）
+- 说明：`Session 管理增强`与`上下文压缩`都归属于 WBS-3，目前仅完成基础会话和检索，压缩链路仍待实现
+- 下一重点：WBS-4（基于 Patch 的工程修改能力）
 
----
-
-## 1) 目录组织（先规划后实现）
-
+## 项目结构
 ```text
-nju_code/
-├── main.py                         # 应用入口
-├── requirements.txt                # 依赖
-├── .env.example                    # 环境变量模板
-├── README.md                       # 项目说明 + 模块分工
-└── frontend/
-    ├── __init__.py
-    ├── app.py                      # Textual 主应用（布局/事件总线）
-    ├── app.tcss                    # 样式布局
-    ├── models.py                   # 数据模型（会话、消息、工具、模型配置）
-    ├── state.py                    # 前端状态管理（会话、配置、持久化）
-    ├── services/
-    │   ├── __init__.py
-    │   ├── settings_store.py       # 本地配置读写（.nju_code/settings.json）
-    │   ├── openai_client.py        # OpenAI 兼容客户端封装（已接入流式调用）
-    │   └── runtime_tools.py        # 最小后端执行能力（Hello World 示例）
-    └── ui/
-        ├── __init__.py
-        └── widgets/
-            ├── __init__.py
-            ├── session_panel.py    # 多会话窗口（新建/切换）
-            ├── chat_panel.py       # 聊天窗口（消息输入/展示）
-            ├── file_tree_panel.py  # 文件树窗口（DirectoryTree）
-            ├── code_viewer_panel.py# 代码查看窗口（语法高亮）
-            ├── tools_panel.py      # 工具权限开关
-            └── config_panel.py     # 模型与镜像配置
+NJUCode/
+├── .env.example
+├── main.py
+├── requirements.txt
+├── LICENSE
+├── README.md
+├── hello_world.py
+├── 改动/
+│   ├── 3.31_jingyu_change.md
+│   └── idea.md
+├── frontend/
+│   ├── __init__.py
+│   ├── app.py
+│   ├── app.tcss
+│   ├── models.py
+│   ├── state.py
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── openai_client.py
+│   │   ├── code_analysis.py
+│   │   ├── settings_store.py
+│   │   └── runtime_tools.py
+│   └── ui/
+│       ├── __init__.py
+│       └── widgets/
+│           ├── __init__.py
+│           ├── chat_panel.py
+│           ├── code_viewer_panel.py
+│           ├── config_panel.py
+│           ├── file_tree_panel.py
+│           ├── session_panel.py
+│           ├── splitter.py
+│           └── tools_panel.py
+├── .nju_code/settings.json
+├── 需求文档.md
+└── 项目管理计划.md
 ```
 
-这个结构参考了你提供的 `easy-coding-agents` 的分层思想：
-- `app.py` 做编排
-- `services/` 放外部能力适配
-- `ui/widgets/` 放可复用组件
-- `state.py` 统一状态，避免 UI 与逻辑耦合
+## 已实现功能
 
----
+### 1) TUI 与会话能力
+- 三栏布局（Explorer / Code+Tools+Model / Chat）
+- 分割条拖拽调宽、聊天栏显示/隐藏
+- 会话创建/切换/重命名/删除
+- 流式输出与中断
 
-## 2) 每个人负责什么（建议分工）
+### 2) 工作区与文件能力
+- 在界面中打开工作区目录
+- 文件树浏览与周期刷新
+- 新建文件/目录、删除文件/目录
+- 代码查看与语法高亮
+- 代码编辑保存（`Ctrl+S`）与重载
+- Code Viewer 空态：未打开文件时显示 `NJU` 艺术字引导，占位态不显示代码框
 
-> 下面是可直接执行的团队分工模板，你可以按成员名字替换。
+### 3) 模型与上下文能力
+- OpenAI 兼容流式接口接入
+- 模型配置（`base_url`、`api_key`、`model`、`model_file`）
+- 镜像预设切换
+- 发送前支持 `@relative/path` 文件上下文注入
 
-- **前端架构负责人（Owner A）**
-  - 负责 `frontend/app.py`、`frontend/app.tcss`
-  - 统一布局规范、事件流、窗口切换体验
+### 4) 检索与多文件分析（本地）
+- 项目扫描与索引，自动过滤目录（`.git`、`venv`、`.venv`、`node_modules`、`__pycache__`）
+- 文本检索（关键词/正则/大小写）
+- Python 符号检索（`class`、`def`、`async def`、`import`）
+- 文件摘要（类/函数/依赖/入口/作用）
+- 基于 import 的依赖图与 1~2 层邻接分析
+- 自然语言 Top-K 文件召回
+- 影响面分析（风险等级 + 建议阅读顺序）
 
-- **会话与交互负责人（Owner B）**
-  - 负责 `session_panel.py`、`chat_panel.py`
-  - 负责会话管理 UX、输入发送、消息渲染策略
+### 5) 检索工作台（Tools 面板）
+- 按钮：`Help`、`Scan`、`Search`、`Symbol`、`Summary`、`Deps`、`Recall`、`Impact`
+- 参数输入：`query`、`path`、`depth`、`top_k`
+- 与聊天中的斜杠命令共用同一执行链路
 
-- **文件工作区负责人（Owner C）**
-  - 负责 `file_tree_panel.py`、`code_viewer_panel.py`
-  - 负责文件树性能、代码高亮和大文件加载策略
+## 运行方式
 
-- **平台接入负责人（Owner D）**
-  - 负责 `services/openai_client.py`、`config_panel.py`
-  - 负责 OpenAI 兼容 API 接入、镜像切换和模型文件配置
-
-- **状态与配置负责人（Owner E）**
-  - 负责 `state.py`、`services/settings_store.py`
-  - 负责状态一致性、配置落盘与版本兼容
-
----
-
-## 3) 当前已实现功能（MVP）
-
-1. **Chat + 多会话**
-   - 可新建会话
-   - 可在会话列表切换
-
-2. **文件树 + 代码查看**
-   - 左侧 `DirectoryTree` 浏览工作区
-  - 选择文件后切到右侧 Code Tab 查看语法高亮代码（与 Tools/Model 同区）
-
-3. **工具权限开关**
-   - 提供 Read/Write/Terminal/Web/Git 等工具开关
-   - 开关状态持久化
-
-4. **模型配置（OpenAI 格式）**
-   - 配置 `base_url`、`api_key`、`model`
-  - 默认配置为 ModelScope：`https://api-inference.modelscope.cn/v1` + `Qwen/Qwen3.5-35B-A3B`
-  - 支持镜像预设：`modelscope` / `official` / `openrouter` / `azure_compatible` / `custom`
-   - 支持指定 `model_file` 字段
-
-5. **最小后端动作**
-  - Tools 面板支持 `Run Hello World`
-  - 会在工作区生成 `hello_world.py` 并执行，结果回显到 Chat
-
-6. **配置持久化**
-   - 自动写入：`.nju_code/settings.json`
-
----
-
-## 4) 运行方式
-
+### 环境准备
 ```bash
-cd /mnt/c/Files/nju_code
 conda activate nju_code
 pip install -r requirements.txt
+```
+
+### 启动应用
+```bash
 python main.py
 ```
 
----
+### 分析命令
+可在聊天输入框直接输入，或通过 Tools 工作台按钮触发：
+```text
+/help
+/scan
+/search <keyword> [--regex] [--case]
+/symbol <name>
+/summary <relative_path>
+/deps <relative_path> [--depth 1|2]
+/recall <requirement text> [--top 5..30]
+/impact <symbol_or_relative_path> [--depth 1|2]
+```
 
-## 5) 下一步（后续你要我继续我可以直接做）
+## 后续计划
 
-- 将 `openai_client.py` 从 stub 替换成真实流式调用（SSE / chunk）
-- 聊天窗口支持 token 流式输出与中断
-- 文件树加入忽略规则（`.gitignore` / 大文件阈值）
-- 工具开关与后端真实工具权限绑定
+### WBS-3 完善
+- Session 记忆分层：短期会话摘要、长期会话归档、会话检索回放
+- 上下文压缩链路：按 token 预算进行文件摘要压缩、历史对话压缩与去重
+- 召回结果二次裁剪：Top-K 文件先摘要后拼接，避免上下文过长
+- 上下文质量策略：优先保留符号定义、调用链与最近改动片段
+- 输出结构补齐：保留机器可消费 JSON 到文件（非聊天窗口）用于后续 patch 接入
 
-## modelscope API
-- 每位魔搭注册用户，当前每天允许进行总数(所有模型加和)为2000次的API-Inference调用。
-- 每个模型均有额外单模型每日使用额度：根据资源、使用情况以及模型发布时间等因素动态调整。该额度最高不超过500，实际额度可远小于500。如遇到429错误，请切换其他模型，或等到第二天使用。
-- https://www.modelscope.cn/my/access/token 配置API
+### WBS-4 Patch 工程修改能力
+- 建立统一 patch 任务模型（约束输入，输出可审阅 diff）
+- 建立安全流程：检索 -> 影响面分析 -> patch 方案
+- 支持 dry-run 与回滚
+
+### WBS-5 Skills 体系
+- 将检索/分析/补丁/测试拆分为可编排技能
+- 增加技能级权限与调用日志
+
+### WBS-6 模型与成本管理
+- 统计 token、时延、失败率
+- 支持多模型路由策略
+
+### WBS-7 测试与质量保障
+- 为分析引擎补齐单元测试
+- 为关键 UI 交互补齐回归检查
+
+## 变更记录
+- 2026-03-31 详细改动见：`改动/3.31_jingyu_change.md`

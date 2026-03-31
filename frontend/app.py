@@ -14,6 +14,7 @@ from textual.widgets import DirectoryTree, Footer, Header, Label, TabPane, Tabbe
 from textual.widgets import TextArea
 
 from .services.openai_client import OpenAICompatibleClient, OpenAIRequest
+from .services.code_analysis import CodeAnalyzer
 from .services.runtime_tools import run_hello_world
 from .state import AppState
 from .ui.widgets.chat_panel import ChatPanel, MessageSubmitted, StreamInterruptRequested
@@ -29,6 +30,7 @@ from .ui.widgets.session_panel import (
 )
 from .ui.widgets.splitter import SplitterDragEnded, SplitterDragged, VerticalSplitter
 from .ui.widgets.tools_panel import HelloWorldRequested, ToolToggled, ToolsPanel
+from .ui.widgets.tools_panel import AnalysisCommandRequested
 
 
 class NjuCodeApp(App):
@@ -55,6 +57,7 @@ class NjuCodeApp(App):
         workspace_root = Path(os.getenv("WORKSPACE_ROOT", ".")).resolve()
         self.state = AppState(workspace_root=workspace_root)
         self.client = OpenAICompatibleClient()
+        self.analyzer = CodeAnalyzer(workspace_root)
         self.stream_cancel_event: Event | None = None
         self.stream_session_id: str | None = None
         self.stream_active = False
@@ -389,6 +392,12 @@ class NjuCodeApp(App):
 
         session_id = self.state.active_session_id
         self.state.append_message("user", message.content)
+
+        # Local analysis commands are executed in-process and do not call the model API.
+        if message.content.strip().startswith("/"):
+            self._run_analysis_command_and_render(message.content.strip())
+            return
+
         self.state.append_message("assistant", "")
         self.state.save()
         self.query_one("#chat_panel", ChatPanel).render_messages(
@@ -435,6 +444,7 @@ class NjuCodeApp(App):
     def on_workspace_changed(self, event: WorkspaceChanged) -> None:
         """处理工作区变更事件。"""
         self.state.workspace_root = event.new_path
+        self.analyzer.set_workspace_root(event.new_path)
         self.state.save()
 
     @on(FileContextAdded)
@@ -484,6 +494,15 @@ class NjuCodeApp(App):
             self.state.active_session.messages, self.state.active_session_id
         )
         self.notify(result)
+
+    @on(AnalysisCommandRequested)
+    def on_analysis_command_requested(self, message: AnalysisCommandRequested) -> None:
+        """处理 Tools 面板发起的本地分析命令。"""
+        if self.stream_active:
+            self.notify("模型正在输出中，请先中断或等待完成。")
+            return
+        self.state.append_message("user", message.command)
+        self._run_analysis_command_and_render(message.command)
 
     def on_mirror_selected(self, message: MirrorSelected) -> None:
         """处理模型镜像预设切换。
@@ -593,3 +612,24 @@ class NjuCodeApp(App):
             error_message = str(error)
 
         self.call_from_thread(self._finish_stream, session_id, cancelled, error_message)
+
+    def _run_analysis_command_and_render(self, command: str) -> None:
+        """执行本地分析命令并将结果回写到聊天视图。"""
+        payload = self.analyzer.run_command(command)
+        if payload.get("type") == "help":
+            commands = payload.get("commands", [])
+            text = "[分析命令帮助]\n" + "\n".join(f"- {cmd}" for cmd in commands)
+            self.state.append_message("assistant", text)
+        elif payload.get("type") == "error":
+            self.state.append_message(
+                "assistant",
+                f"[系统提示] 分析命令失败: {payload.get('error')}",
+            )
+        else:
+            text_view = self.analyzer.to_text(payload)
+            self.state.append_message("assistant", text_view)
+
+        self.state.save()
+        self.query_one("#chat_panel", ChatPanel).render_messages(
+            self.state.active_session.messages, self.state.active_session_id
+        )
