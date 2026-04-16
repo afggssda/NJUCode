@@ -121,10 +121,8 @@ class NjuCodeApp(App):
             self.left_ratio *= scale
             self.right_ratio *= scale
         self.refresh_ui()
-        self._diagnose_syntax_highlighting()
         self._apply_pane_widths()
         self._update_status_bar()
-        self.notify("可拖拽中间两条竖线调节左侧目录与右侧聊天宽度。")
 
     def _detect_git_branch(self) -> str:
         """尝试读取当前工作区 git 分支名。"""
@@ -262,11 +260,21 @@ class NjuCodeApp(App):
         x = self._clamp(message.screen_x / total_width, 0.0, 1.0)
         if message.splitter_id == "left":
             max_left = 1.0 - self.right_ratio - min_center
-            self.left_ratio = self._clamp(x, 0.0, max_left)
+            if not self.left_visible and x > 0:
+                self.left_visible = True
+                self.left_ratio = self._clamp(max(x, self.left_show_ratio), 0.0, max_left)
+            else:
+                self.left_ratio = self._clamp(x, 0.0, max_left)
         elif message.splitter_id == "right":
             proposed_right = 1.0 - x
             max_right = 1.0 - self.left_ratio - min_center
-            self.right_ratio = self._clamp(proposed_right, 0.0, max_right)
+            if not self.right_visible and proposed_right > 0:
+                self.right_visible = True
+                self.right_ratio = self._clamp(
+                    max(proposed_right, self.right_show_ratio), 0.0, max_right
+                )
+            else:
+                self.right_ratio = self._clamp(proposed_right, 0.0, max_right)
 
         self._apply_pane_widths()
 
@@ -339,6 +347,280 @@ class NjuCodeApp(App):
         if not self.stream_active:
             chat_panel.set_busy(False, "Idle")
 
+    def _workspace_files(self) -> list[Path]:
+        """Return workspace files while skipping common generated directories."""
+        files: list[Path] = []
+        excluded = {".git", "venv", ".venv", "node_modules", "__pycache__"}
+        for path in self.state.workspace_root.rglob("*"):
+            if not path.is_file():
+                continue
+            if set(path.parts) & excluded:
+                continue
+            files.append(path)
+        return files
+
+    def _safe_read_file(self, file_path: Path) -> str:
+        try:
+            return file_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return ""
+
+    def _relative_workspace_path(self, file_path: Path) -> str:
+        try:
+            return str(file_path.relative_to(self.state.workspace_root)).replace("\\", "/")
+        except ValueError:
+            return str(file_path).replace("\\", "/")
+
+    def _resolve_file_reference(self, raw_path: str, workspace_files: list[Path] | None = None) -> str | None:
+        candidate = raw_path.strip().strip("\"'`")
+        if not candidate:
+            return None
+
+        normalized = candidate.replace("\\", "/").lstrip("./")
+        direct_path = self.state.workspace_root / normalized
+        if direct_path.exists() and direct_path.is_file():
+            return self._relative_workspace_path(direct_path)
+
+        files = workspace_files if workspace_files is not None else self._workspace_files()
+        lowered = normalized.lower()
+        basename = Path(lowered).name
+
+        exact_matches = [
+            self._relative_workspace_path(path)
+            for path in files
+            if self._relative_workspace_path(path).lower() == lowered
+        ]
+        if exact_matches:
+            return sorted(exact_matches, key=len)[0]
+
+        suffix_matches = [
+            self._relative_workspace_path(path)
+            for path in files
+            if self._relative_workspace_path(path).lower().endswith(f"/{lowered}")
+            or Path(self._relative_workspace_path(path).lower()).name == basename
+        ]
+        if suffix_matches:
+            return sorted(set(suffix_matches), key=len)[0]
+        return None
+
+    def _extract_file_candidates(self, content: str, workspace_files: list[Path]) -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        for match in re.finditer(r"@([\w\./\\-]+)", content):
+            resolved = self._resolve_file_reference(match.group(1), workspace_files)
+            if resolved and resolved not in seen:
+                seen.add(resolved)
+                candidates.append(resolved)
+
+        for raw_token in re.findall(r"\b[\w./\\-]+\.[A-Za-z0-9]{1,8}\b", content):
+            resolved = self._resolve_file_reference(raw_token, workspace_files)
+            if resolved and resolved not in seen:
+                seen.add(resolved)
+                candidates.append(resolved)
+
+        return candidates[:6]
+
+    def _extract_symbol_candidates(self, content: str) -> list[str]:
+        stopwords = {
+            "main",
+            "python",
+            "file",
+            "code",
+            "function",
+            "class",
+            "method",
+            "content",
+            "what",
+            "this",
+            "that",
+        }
+        candidates: list[str] = []
+        seen: set[str] = set()
+        patterns = [
+            r"`([A-Za-z_][A-Za-z0-9_]*)`",
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)",
+            r"(?:\u51fd\u6570|\u65b9\u6cd5|\u7c7b|class|method|function|def)\s*`?([A-Za-z_][A-Za-z0-9_]*)`?",
+        ]
+
+        for pattern in patterns:
+            for match in re.finditer(pattern, content, flags=re.IGNORECASE):
+                candidate = match.group(1)
+                lowered = candidate.lower()
+                if lowered in stopwords or len(candidate) < 3:
+                    continue
+                if candidate not in seen:
+                    seen.add(candidate)
+                    candidates.append(candidate)
+
+        for token in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", content):
+            if token in seen or token.lower() in stopwords:
+                continue
+            if "_" in token or any(ch.isupper() for ch in token[1:]):
+                seen.add(token)
+                candidates.append(token)
+
+        return candidates[:5]
+
+    def _rank_symbol_hits(
+        self,
+        symbol: str,
+        hits: list[dict[str, object]],
+        content: str,
+        referenced_paths: list[str],
+    ) -> list[dict[str, object]]:
+        scored_hits = self._score_symbol_hits(symbol, hits, content, referenced_paths)
+        scored_hits.sort(
+            key=lambda item: (
+                -item[0],
+                str(item[1].get("path", "")),
+                int(item[1].get("line", 0)),
+            )
+        )
+        return [hit for _, hit in scored_hits]
+
+    def _score_symbol_hits(
+        self,
+        symbol: str,
+        hits: list[dict[str, object]],
+        content: str,
+        referenced_paths: list[str],
+    ) -> list[tuple[float, dict[str, object]]]:
+        query_lower = content.lower()
+        query_tokens = {
+            token.lower()
+            for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,}", content)
+            if len(token) >= 2
+        }
+        referenced = {path.lower() for path in referenced_paths}
+
+        scored_hits: list[tuple[float, dict[str, object]]] = []
+        for hit in hits:
+            path = str(hit.get("path", ""))
+            path_lower = path.lower()
+            basename = Path(path_lower).name
+            path_parts = {
+                part
+                for part in re.split(r"[/._\\-]+", path_lower)
+                if part
+            }
+            kind = str(hit.get("kind", "")).lower()
+
+            score = 0.0
+            if path_lower in referenced:
+                score += 6.0
+            if any(path_lower.endswith(ref) or ref.endswith(path_lower) for ref in referenced):
+                score += 3.0
+
+            overlap = len(query_tokens & path_parts)
+            score += min(overlap, 4) * 1.25
+
+            if basename in query_lower:
+                score += 2.0
+            if symbol.lower() in basename:
+                score += 1.5
+            if str(hit.get("name", "")) == symbol:
+                score += 1.0
+
+            if "class" in query_lower or "\u7c7b" in query_lower:
+                score += 1.0 if kind == "class" else -0.5
+            if any(word in query_lower for word in ("function", "method", "def", "\u51fd\u6570", "\u65b9\u6cd5")):
+                score += 1.0 if "def" in kind else -0.5
+
+            line = int(hit.get("line", 999999))
+            score += max(0.0, 1.0 - min(line, 400) / 400.0)
+            score += max(0.0, 1.0 - min(len(path), 120) / 120.0)
+
+            scored_hits.append((score, hit))
+        return scored_hits
+
+    def _select_symbol_hits(
+        self,
+        symbol: str,
+        hits: list[dict[str, object]],
+        content: str,
+        referenced_paths: list[str],
+    ) -> list[dict[str, object]]:
+        scored_hits = self._score_symbol_hits(symbol, hits, content, referenced_paths)
+        scored_hits.sort(
+            key=lambda item: (
+                -item[0],
+                str(item[1].get("path", "")),
+                int(item[1].get("line", 0)),
+            )
+        )
+        if not scored_hits:
+            return []
+        ranked_hits = [hit for _, hit in scored_hits]
+        if len(scored_hits) == 1:
+            return ranked_hits[:1]
+        top_score = scored_hits[0][0]
+        second_score = scored_hits[1][0]
+        return ranked_hits[:1] if top_score - second_score >= 2.0 else ranked_hits[:2]
+
+    def _build_auto_contexts(self, content: str) -> list[tuple[str, str]]:
+        workspace_files = self._workspace_files()
+        file_contexts: list[tuple[str, str]] = []
+        attached_paths: set[str] = set()
+        notes: list[str] = []
+        file_candidates = self._extract_file_candidates(content, workspace_files)
+
+        def attach_file(rel_path: str, reason: str) -> None:
+            if rel_path in attached_paths:
+                return
+            full_path = self.state.workspace_root / rel_path
+            text = self._safe_read_file(full_path)
+            if not text:
+                return
+            attached_paths.add(rel_path)
+            file_contexts.append((rel_path, text))
+            notes.append(f"{reason}: {rel_path}")
+
+        for rel_path in file_candidates:
+            attach_file(rel_path, "file_match")
+            summary = self.analyzer.summarize_file(rel_path)
+            file_contexts.append((f"[AUTO-SUMMARY] {rel_path}", self.analyzer.to_text(summary)))
+
+        for symbol in self._extract_symbol_candidates(content):
+            result = self.analyzer.symbol_search(symbol)
+            hits = self._select_symbol_hits(symbol, result.get("hits", []), content, file_candidates)
+            if not hits:
+                continue
+            notes.append(
+                "symbol_match: "
+                + ", ".join(f"{hit['name']} @ {hit['path']}:{hit['line']}" for hit in hits)
+            )
+            for hit in hits:
+                snippet = (
+                    f"Detected symbol `{hit['name']}`.\n"
+                    f"Kind: {hit['kind']}\n"
+                    f"File: {hit['path']}:{hit['line']}\n"
+                    f"Local context:\n{hit['context']}"
+                )
+                file_contexts.append(
+                    (f"[AUTO-SYMBOL] {hit['name']} @ {hit['path']}:{hit['line']}", snippet)
+                )
+                attach_file(hit["path"], "symbol_source")
+
+        if notes:
+            file_contexts.insert(
+                0,
+                (
+                    "[AUTO-CONTEXT]",
+                    "Automatically attached local context for this user message:\n- "
+                    + "\n- ".join(notes),
+                ),
+            )
+
+        deduped: list[tuple[str, str]] = []
+        seen_labels: set[str] = set()
+        for label, text in file_contexts:
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+            deduped.append((label, text))
+        return deduped
+
     def on_session_create_requested(self, _: SessionCreateRequested) -> None:
         """响应新建会话请求。
 
@@ -409,18 +691,7 @@ class NjuCodeApp(App):
         self.stream_cancel_event = Event()
         self.query_one("#chat_panel", ChatPanel).set_busy(True, "正在等待模型响应...")
 
-        file_contexts = []
-        if self.state.workspace_root:
-            workspace_path = Path(self.state.workspace_root)
-            for m in re.finditer(r'@([\w\./\\-]+)', message.content):
-                rel_path = m.group(1)
-                full_path = workspace_path / rel_path
-                if full_path.exists() and full_path.is_file():
-                    try:
-                        content = full_path.read_text(encoding="utf-8", errors="ignore")
-                        file_contexts.append((str(rel_path), content))
-                    except Exception:
-                        pass
+        file_contexts = self._build_auto_contexts(message.content)
 
         # 构建完整的上下文历史传递（排除最后一条临时占位的 assistant）
         history_msgs = self.state.active_session.messages[:-1]

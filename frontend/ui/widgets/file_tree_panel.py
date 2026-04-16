@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from textual import work, on
@@ -98,10 +99,10 @@ class ConfirmDeleteFileScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm_dialog"):
-            yield Label(f"确认要删除吗？\n\n{self.target.name}", id="confirm_title")
+            yield Label(f"Delete this item?\n\n{self.target.name}", id="confirm_title")
             with Horizontal(classes="dialog-buttons"):
-                yield Button("取消", id="btn_cancel")
-                yield Button("删除", id="btn_confirm", variant="error")
+                yield Button("Cancel", id="btn_cancel")
+                yield Button("Delete", id="btn_confirm", variant="error")
 
     @on(Button.Pressed, "#btn_cancel")
     def cancel(self) -> None:
@@ -116,6 +117,7 @@ class FileTreePanel(Vertical):
     BINDINGS = [
         ("n", "new_file", "New File/Dir"),
         ("delete", "delete_file", "Delete"),
+        ("ctrl+z", "undo_delete", "Undo Delete"),
     ]
 
     def __init__(self, workspace_root: Path, **kwargs):
@@ -129,12 +131,14 @@ class FileTreePanel(Vertical):
         super().__init__(**kwargs)
         self.workspace_root = workspace_root
         self._refresh_running = False
+        self._trash_dir = self.workspace_root / ".nju_code" / "trash"
+        self._deleted_history: list[tuple[Path, Path]] = []
 
     def compose(self):
         """构建 Explorer 面板组件。"""
         with Horizontal(id="explorer_title_row"):
-            yield Label("Explorer", classes="panel-title")
             yield Button("Open Folder", id="btn_open_folder", variant="primary", classes="small_btn")
+            yield Button("Undo Delete", id="btn_undo_delete", classes="small_btn", disabled=True)
         yield DirectoryTree(str(self.workspace_root), id="workspace_tree")
 
     @on(Button.Pressed, "#btn_open_folder")
@@ -142,11 +146,60 @@ class FileTreePanel(Vertical):
         def check_reply(new_path: Path | None) -> None:
             if new_path:
                 self.workspace_root = new_path
+                self._trash_dir = self.workspace_root / ".nju_code" / "trash"
+                self._deleted_history = []
                 tree = self.query_one("#workspace_tree", DirectoryTree)
                 tree.path = str(new_path)
+                self._update_undo_button()
                 self.post_message(WorkspaceChanged(new_path))
-                self.app.notify(f"已切换工作区: {new_path}")
+                self.app.notify(f"Workspace changed: {new_path}")
         self.app.push_screen(OpenFolderScreen(), check_reply)
+
+    def _update_undo_button(self) -> None:
+        button = self.query_one("#btn_undo_delete", Button)
+        while self._deleted_history and not self._deleted_history[-1][1].exists():
+            self._deleted_history.pop()
+        button.disabled = not self._deleted_history
+
+    def _move_to_trash(self, path: Path) -> None:
+        self._trash_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        backup_path = self._trash_dir / f"{stamp}_{path.name}"
+        shutil.move(str(path), str(backup_path))
+        self._deleted_history.append((path, backup_path))
+        self._update_undo_button()
+
+    def action_undo_delete(self) -> None:
+        self._update_undo_button()
+        if not self._deleted_history:
+            self.app.notify("Tip: No delete action to undo", severity="warning")
+            return
+
+        original_path, backup_path = self._deleted_history.pop()
+        if not backup_path.exists():
+            self._update_undo_button()
+            self.app.notify("Tip: Undo failed, backup no longer exists", severity="error")
+            return
+        if original_path.exists():
+            self._deleted_history.append((original_path, backup_path))
+            self._update_undo_button()
+            self.app.notify(
+                f"Tip: Undo failed, {original_path.name} already exists",
+                severity="error",
+            )
+            return
+
+        try:
+            original_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(backup_path), str(original_path))
+            restored_name = original_path.name
+            self._update_undo_button()
+            self._refresh_tree()
+            self.app.notify(f"Tip: Restored {restored_name}")
+        except Exception as error:
+            self._deleted_history.append((original_path, backup_path))
+            self._update_undo_button()
+            self.app.notify(f"Tip: Undo failed: {error}", severity="error")
 
     def action_new_file(self) -> None:
         """在新选中的目录下或同级新建文件/文件夹。"""
@@ -174,9 +227,9 @@ class FileTreePanel(Vertical):
                         new_path.parent.mkdir(parents=True, exist_ok=True)
                         new_path.touch(exist_ok=True)
                     self._refresh_tree()
-                    self.app.notify(f"已创建: {new_path.name}")
+                    self.app.notify(f"Created: {new_path.name}")
                 except Exception as e:
-                    self.app.notify(f"创建失败: {e}", severity="error")
+                    self.app.notify(f"Create failed: {e}", severity="error")
 
         self.app.push_screen(NewFileScreen(target_dir), check_reply)
 
@@ -200,11 +253,68 @@ class FileTreePanel(Vertical):
                     else:
                         path.unlink()
                     self._refresh_tree()
-                    self.app.notify(f"已删除: {path.name}")
+                    self.app.notify(f"Deleted: {path.name}")
                 except Exception as e:
-                    self.app.notify(f"删除失败: {e}", severity="error")
+                    self.app.notify(f"Delete failed: {e}", severity="error")
 
         self.app.push_screen(ConfirmDeleteFileScreen(path), check_reply)
+
+    def action_new_file(self) -> None:
+        tree = self.query_one("#workspace_tree", DirectoryTree)
+        node = tree.cursor_node
+        if node is None:
+            target_dir = self.workspace_root
+        else:
+            data = getattr(node, "data", None)
+            path = getattr(data, "path", None)
+            if path is None:
+                target_dir = self.workspace_root
+            elif path.is_dir():
+                target_dir = path
+            else:
+                target_dir = path.parent
+
+        def check_reply(name: str | None) -> None:
+            if name:
+                new_path = target_dir / name
+                try:
+                    if name.endswith("/") or name.endswith("\\"):
+                        new_path.mkdir(parents=True, exist_ok=True)
+                    else:
+                        new_path.parent.mkdir(parents=True, exist_ok=True)
+                        new_path.touch(exist_ok=True)
+                    self._refresh_tree()
+                    self.app.notify(f"Created: {new_path.name}")
+                except Exception as error:
+                    self.app.notify(f"Create failed: {error}", severity="error")
+
+        self.app.push_screen(NewFileScreen(target_dir), check_reply)
+
+    def action_delete_file(self) -> None:
+        tree = self.query_one("#workspace_tree", DirectoryTree)
+        node = tree.cursor_node
+        if node is None:
+            return
+
+        data = getattr(node, "data", None)
+        path = getattr(data, "path", None)
+        if path is None or path == self.workspace_root:
+            return
+
+        def check_reply(confirm: bool) -> None:
+            if confirm:
+                try:
+                    self._move_to_trash(path)
+                    self._refresh_tree()
+                    self.app.notify(f"Deleted: {path.name}. Click Undo Delete to restore")
+                except Exception as error:
+                    self.app.notify(f"Delete failed: {error}", severity="error")
+
+        self.app.push_screen(ConfirmDeleteFileScreen(path), check_reply)
+
+    @on(Button.Pressed, "#btn_undo_delete")
+    def on_undo_delete(self) -> None:
+        self.action_undo_delete()
 
     def on_mount(self) -> None:
         """组件挂载后启动周期刷新定时器。
@@ -212,6 +322,7 @@ class FileTreePanel(Vertical):
         当前策略为每 10 秒尝试一次异步刷新，
         用于捕获外部文件系统变化。
         """
+        self._update_undo_button()
         self.set_interval(10, self._schedule_refresh)
 
     def _schedule_refresh(self) -> None:

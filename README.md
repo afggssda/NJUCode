@@ -3,11 +3,12 @@
 `NJUCode` 是一个基于 Textual 的终端代码助手原型。项目正在从“聊天壳”逐步演进为可检索、可分析、可安全修改代码的 Code Agent。
 
 ## 使用前请自行替换API key https://www.modelscope.cn/my/access/token
+### 替换.env文件的OPENAI_API_KEY即可
 
 ## 当前进度
 - 已完成：WBS-1（项目初始化）、WBS-2（CLI 与会话系统）
 - 基本完成：WBS-3（上下文分析与检索，含检索工作台）
-- 说明：`Session 管理增强`与`上下文压缩`都归属于 WBS-3，目前仅完成基础会话和检索，压缩链路仍待实现
+- 说明：`Session 管理增强`已补强到“多会话 + 文件安全删除/撤销 + 基础交互修复”，`上下文压缩`仍未完成
 - 下一重点：WBS-4（基于 Patch 的工程修改能力）
 
 ## 项目结构
@@ -21,6 +22,7 @@ NJUCode/
 ├── hello_world.py
 ├── 改动/
 │   ├── 3.31_jingyu_change.md
+│   ├── 4.16_jingyu_change.md
 │   └── idea.md
 ├── frontend/
 │   ├── __init__.py
@@ -62,6 +64,7 @@ NJUCode/
 - 在界面中打开工作区目录
 - 文件树浏览与周期刷新
 - 新建文件/目录、删除文件/目录
+- 删除进入 `.nju_code/trash`，支持 `Undo Delete` 与 `Ctrl+Z` 连续撤销
 - 代码查看与语法高亮
 - 代码编辑保存（`Ctrl+S`）与重载
 - Code Viewer 空态：未打开文件时显示 `NJU` 艺术字引导，占位态不显示代码框
@@ -71,6 +74,7 @@ NJUCode/
 - 模型配置（`base_url`、`api_key`、`model`、`model_file`）
 - 镜像预设切换
 - 发送前支持 `@relative/path` 文件上下文注入
+- 普通对话支持自动识别文件名、路径、函数名、类名并注入相关上下文
 
 ### 4) 检索与多文件分析（本地）
 - 项目扫描与索引，自动过滤目录（`.git`、`venv`、`.venv`、`node_modules`、`__pycache__`）
@@ -80,6 +84,7 @@ NJUCode/
 - 基于 import 的依赖图与 1~2 层邻接分析
 - 自然语言 Top-K 文件召回
 - 影响面分析（风险等级 + 建议阅读顺序）
+- 同名符号命中时支持自动排序，仅优先保留最相关的 1~2 个结果
 
 ### 5) 检索工作台（Tools 面板）
 - 按钮：`Help`、`Scan`、`Search`、`Symbol`、`Summary`、`Deps`、`Recall`、`Impact`
@@ -140,3 +145,4 @@ python main.py
 
 ## 变更记录
 - 2026-03-31 详细改动见：`改动/3.31_jingyu_change.md`
+- 2026-04-16 详细改动见：`改动/4.16_jingyu_change.md`

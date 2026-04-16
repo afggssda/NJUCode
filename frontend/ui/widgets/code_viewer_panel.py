@@ -188,7 +188,7 @@ class CodeViewerPanel(Vertical):
                 )
                 self._missing_language_warned = True
 
-            self._set_empty_state(False)
+        self._set_empty_state(False)
         save_btn.disabled = False
         reload_btn.disabled = False
         ask_btn.disabled = False

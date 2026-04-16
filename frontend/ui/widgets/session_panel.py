@@ -63,8 +63,8 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
             yield Label(self.title, id="confirm_title")
             yield Label(self.message, id="confirm_message")
             with Horizontal(id="confirm_actions"):
-                yield Button("取消", id="confirm_cancel")
-                yield Button("删除", id="confirm_ok", variant="error")
+                yield Button("Cancel", id="confirm_cancel")
+                yield Button("Delete", id="confirm_ok", variant="error")
 
     @on(Button.Pressed, "#confirm_ok")
     def on_confirm(self) -> None:
@@ -157,7 +157,7 @@ class SessionPanel(Vertical):
             self.post_message(SessionDeleteRequested(target_session_id))
 
         self.app.push_screen(
-            ConfirmDeleteScreen("确认删除", "确定要删除该会话吗？"),
+            ConfirmDeleteScreen("Delete chat", "Are you sure you want to delete this chat?"),
             handle_confirm,
         )
 
