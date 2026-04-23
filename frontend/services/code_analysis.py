@@ -261,7 +261,17 @@ class CodeAnalyzer:
         }
 
     def summarize_file(self, rel_path: str) -> dict[str, Any]:
-        full_path = self.workspace_root / rel_path
+        full_path = (self.workspace_root / rel_path).resolve()
+        # Security: Ensure path stays within workspace
+        try:
+            full_path.relative_to(self.workspace_root.resolve())
+        except ValueError:
+            return {
+                "type": "file_summary",
+                "path": rel_path,
+                "error": "path_outside_workspace",
+            }
+
         if not full_path.exists() or not full_path.is_file():
             return {
                 "type": "file_summary",

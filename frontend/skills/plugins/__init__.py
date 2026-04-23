@@ -1,0 +1,1 @@
+"""Skills plugins package - Directory for external plugin installation."""

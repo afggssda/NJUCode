@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, Dict
+
 from textual import on
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
@@ -29,6 +31,15 @@ class HelloWorldRequested(Message):
 class AnalysisCommandRequested(Message):
     def __init__(self, command: str) -> None:
         self.command = command
+        super().__init__()
+
+
+class SkillExecutionRequested(Message):
+    """Event for direct skill execution (bypasses command parsing)."""
+
+    def __init__(self, skill_id: str, params: Dict[str, Any] = None) -> None:
+        self.skill_id = skill_id
+        self.params = params or {}
         super().__init__()
 
 

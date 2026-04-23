@@ -4,11 +4,20 @@ from dataclasses import asdict
 from datetime import datetime
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from .models import ChatMessage, ChatSession, DEFAULT_TOOLS, MIRROR_PRESETS, ModelConfig, ToolToggle
 from .services.settings_store import SettingsStore
+from .skills.models import SkillToggle
+from .skills.registry import SkillRegistry
+from .skills.audit_log import AuditLogger
+from .skills.executor import SkillExecutor
+from .skills.permissions import PermissionChecker
+from .skills.builtin import BUILTIN_MANIFESTS
+from .mcp.manager import MCPManager
+from .mcp.executor import MCPToolExecutor
+from .mcp.models import MCPToolToggle
 
 
 class AppState:
@@ -42,6 +51,18 @@ class AppState:
         )
         self.left_ratio = 0.18
         self.right_ratio = 0.34
+
+        # Skills system initialization
+        self.skills: Dict[str, SkillToggle] = {}
+        self.skill_registry: Optional[SkillRegistry] = None
+        self._audit_logger: Optional[AuditLogger] = None
+        self._skill_executor: Optional[SkillExecutor] = None
+        self._analyzer: Any = None  # Set by app.py after CodeAnalyzer creation
+
+        # MCP system initialization
+        self.mcp_manager: Optional[MCPManager] = None
+        self._mcp_executor: Optional[MCPToolExecutor] = None
+        self.mcp_tools: Dict[str, MCPToolToggle] = {}
 
     def load(self) -> None:
         """从磁盘加载已保存的设置并恢复到内存。
@@ -127,9 +148,14 @@ class AppState:
         会话消息会带上 ISO 时间戳，
         以便下次启动时能准确恢复消息顺序与历史内容。
         该方法通常在关键用户操作后被调用。
+        注意：API key 不保存到文件，仅从环境变量读取。
         """
+        model_config_dict = asdict(self.model_config)
+        # Never save API key to settings file for security
+        model_config_dict["api_key"] = ""
+
         payload = {
-            "model": asdict(self.model_config),
+            "model": model_config_dict,
             "ui": {
                 "left_ratio": self.left_ratio,
                 "right_ratio": self.right_ratio,
@@ -153,6 +179,18 @@ class AppState:
             ],
         }
         self.settings_store.save(payload)
+
+        # Save skills registry state
+        if self.skill_registry:
+            self.skill_registry.save()
+
+        # Save audit logs
+        if self._audit_logger:
+            self._audit_logger.save()
+
+        # Save MCP manager state
+        if self.mcp_manager:
+            self.mcp_manager.save()
 
     @property
     def active_session(self) -> ChatSession:
@@ -273,3 +311,152 @@ class AppState:
         self.model_config.mirror = mirror
         if mirror in MIRROR_PRESETS and MIRROR_PRESETS[mirror]:
             self.model_config.base_url = MIRROR_PRESETS[mirror]
+
+    def init_skills(self, analyzer: Any) -> None:
+        """Initialize skills system.
+
+        Args:
+            analyzer: CodeAnalyzer instance from app.py
+        """
+        self._analyzer = analyzer
+
+        # Create registry and audit logger
+        self.skill_registry = SkillRegistry(self.workspace_root)
+        self._audit_logger = AuditLogger(self.workspace_root)
+        self._audit_logger.load()
+
+        # Register builtin skills
+        for manifest in BUILTIN_MANIFESTS:
+            self.skill_registry.register_skill(manifest)
+
+        # Load plugins
+        self.skill_registry.load_plugins()
+
+        # Load saved state
+        self.skill_registry.load()
+
+        # Create permission checker and executor
+        self.skills = self.skill_registry.skills
+
+    def execute_skill(
+        self,
+        skill_id: str,
+        params: Dict[str, Any],
+    ) -> Any:
+        """Execute a skill by ID.
+
+        Args:
+            skill_id: Skill to execute
+            params: Input parameters
+
+        Returns:
+            Skill output dict
+        """
+        if not self._skill_executor and self._analyzer:
+            permission_checker = PermissionChecker(self.tools, self.skills)
+            self._skill_executor = SkillExecutor(
+                self.skill_registry,
+                permission_checker,
+                self._audit_logger,
+                self._analyzer,
+            )
+
+        if not self._skill_executor:
+            return {"type": "error", "error": "Skills system not initialized"}
+
+        result = self._skill_executor.execute(
+            skill_id,
+            params,
+            self.active_session_id,
+            {"workspace_root": self.workspace_root},
+        )
+        return result.output if result.success else {"type": "error", "error": result.log.error_message}
+
+    def execute_skill_command(self, command: str) -> Any:
+        """Execute skill by command alias.
+
+        Args:
+            command: Command string like "/scan", "/search keyword"
+
+        Returns:
+            Skill output dict
+        """
+        if not self._skill_executor and self._analyzer:
+            permission_checker = PermissionChecker(self.tools, self.skills)
+            self._skill_executor = SkillExecutor(
+                self.skill_registry,
+                permission_checker,
+                self._audit_logger,
+                self._analyzer,
+            )
+
+        if not self._skill_executor:
+            return {"type": "error", "error": "Skills system not initialized"}
+
+        result = self._skill_executor.execute_by_command(
+            command,
+            self.active_session_id,
+            {"workspace_root": self.workspace_root},
+        )
+        return result.output if result.success else {"type": "error", "error": result.log.error_message}
+
+    def update_skill(self, skill_id: str, enabled: bool) -> None:
+        """Update skill enabled status.
+
+        Args:
+            skill_id: Skill ID
+            enabled: New enabled state
+        """
+        if self.skill_registry:
+            self.skill_registry.update_skill_status(skill_id, enabled)
+
+    def init_mcp(self) -> None:
+        """Initialize MCP system.
+
+        Creates MCPManager and loads server configurations.
+        Async connection happens in app.py after Textual is ready.
+        """
+        self.mcp_manager = MCPManager(self.workspace_root)
+        self.mcp_manager.load()
+        self.mcp_tools = self.mcp_manager.tool_toggles
+
+    def execute_mcp_tool(
+        self,
+        skill_id: str,
+        params: Dict[str, Any],
+    ) -> Any:
+        """Execute an MCP tool synchronously.
+
+        Args:
+            skill_id: MCP tool skill_id (e.g., "mcp.filesystem.read_file")
+            params: Tool input arguments
+
+        Returns:
+            Tool output dict
+        """
+        if not self._mcp_executor and self.mcp_manager and self._audit_logger:
+            self._mcp_executor = MCPToolExecutor(
+                self.mcp_manager,
+                self._audit_logger,
+            )
+
+        if not self._mcp_executor:
+            return {"type": "error", "error": "MCP system not initialized"}
+
+        result = self._mcp_executor.execute_sync(
+            skill_id,
+            params,
+            self.active_session_id,
+            {"workspace_root": str(self.workspace_root)},
+        )
+        return result.output if result.success else {"type": "error", "error": result.log.error_message}
+
+    def update_mcp_tool(self, skill_id: str, enabled: bool) -> None:
+        """Update MCP tool enabled status.
+
+        Args:
+            skill_id: MCP tool skill_id
+            enabled: New enabled state
+        """
+        if self.mcp_manager:
+            self.mcp_manager.update_tool_status(skill_id, enabled)

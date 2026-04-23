@@ -30,7 +30,9 @@ from .ui.widgets.session_panel import (
 )
 from .ui.widgets.splitter import SplitterDragEnded, SplitterDragged, VerticalSplitter
 from .ui.widgets.tools_panel import HelloWorldRequested, ToolToggled, ToolsPanel
-from .ui.widgets.tools_panel import AnalysisCommandRequested
+from .ui.widgets.tools_panel import AnalysisCommandRequested, SkillExecutionRequested
+from .ui.widgets.skills_panel import SkillsPanel, SkillToggled, AuditLogRequested
+from .ui.widgets.mcp_panel import MCPPanel, MCPServerConnectRequested, MCPToolToggled, MCPServerAddRequested
 
 
 class NjuCodeApp(App):
@@ -92,6 +94,10 @@ class NjuCodeApp(App):
                     yield CodeViewerPanel(id="code_view")
                 with TabPane("Tools", id="tools"):
                     yield ToolsPanel(id="tools_panel")
+                with TabPane("Skills", id="skills"):
+                    yield SkillsPanel(id="skills_panel")
+                with TabPane("MCP", id="mcp"):
+                    yield MCPPanel(id="mcp_panel")
                 with TabPane("Model", id="model"):
                     yield ConfigPanel(id="config_panel")
             yield VerticalSplitter(splitter_id="right", id="splitter_right")
@@ -123,6 +129,13 @@ class NjuCodeApp(App):
         self.refresh_ui()
         self._apply_pane_widths()
         self._update_status_bar()
+
+        # Initialize skills system after analyzer is ready
+        self.state.init_skills(self.analyzer)
+
+        # Initialize MCP system
+        self.state.init_mcp()
+        self._async_init_mcp_servers()
 
     def _detect_git_branch(self) -> str:
         """尝试读取当前工作区 git 分支名。"""
@@ -321,14 +334,16 @@ class NjuCodeApp(App):
     def refresh_ui(self) -> None:
         """将全局状态同步到各 UI 面板。
 
-        该方法会统一刷新会话列表、聊天内容、工具开关和模型配置。
+        该方法会统一刷新会话列表、聊天内容、工具开关、技能和 MCP 配置。
         若当前没有流式输出任务，还会将聊天状态恢复为 Idle。
-        这是应用内部最核心的“状态 -> 视图”同步入口。
+        这是应用内部最核心的"状态 -> 视图"同步入口。
         """
         session_panel = self.query_one("#session_panel", SessionPanel)
         chat_panel = self.query_one("#chat_panel", ChatPanel)
         tools_panel = self.query_one("#tools_panel", ToolsPanel)
         config_panel = self.query_one("#config_panel", ConfigPanel)
+        skills_panel = self.query_one("#skills_panel", SkillsPanel)
+        mcp_panel = self.query_one("#mcp_panel", MCPPanel)
 
         session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
         chat_panel.render_messages(self.state.active_session.messages, self.state.active_session_id)
@@ -336,6 +351,10 @@ class NjuCodeApp(App):
             chat_panel.set_busy(False, "Idle")
         tools_panel.refresh_tools(list(self.state.tools.values()))
         config_panel.load_config(self.state.model_config)
+        skills_panel.refresh_skills(list(self.state.skills.values()))
+        if self.state.mcp_manager:
+            mcp_panel.refresh_servers(list(self.state.mcp_manager.servers.values()))
+            mcp_panel.refresh_tools(self.state.mcp_manager.list_tools())
         self._update_status_bar()
 
     def _refresh_active_chat_view(self) -> None:
@@ -775,6 +794,67 @@ class NjuCodeApp(App):
         self.state.append_message("user", message.command)
         self._run_analysis_command_and_render(message.command)
 
+    @on(SkillExecutionRequested)
+    def on_skill_execution_requested(self, message: SkillExecutionRequested) -> None:
+        """处理直接技能执行请求。"""
+        if self.stream_active:
+            self.notify("模型正在输出中，请先中断或等待完成。")
+            return
+
+        result = self.state.execute_skill(message.skill_id, message.params)
+
+        # Display result in chat
+        self.state.append_message("user", f"执行技能: {message.skill_id}")
+        if result.get("type") == "error":
+            self.state.append_message("assistant", f"[错误] {result.get('error')}")
+        else:
+            text_view = self.analyzer.to_text(result)
+            self.state.append_message("assistant", text_view)
+
+        self.state.save()
+        self.query_one("#chat_panel", ChatPanel).render_messages(
+            self.state.active_session.messages, self.state.active_session_id
+        )
+
+    @on(SkillToggled)
+    def on_skill_toggled(self, message: SkillToggled) -> None:
+        """处理技能开关变化。"""
+        self.state.update_skill(message.skill_id, message.enabled)
+        self.state.save()
+        # Refresh skills panel
+        skills_panel = self.query_one("#skills_panel", SkillsPanel)
+        skills_panel.refresh_skills(list(self.state.skills.values()))
+        self.notify(f"Skill {message.skill_id} {'enabled' if message.enabled else 'disabled'}")
+
+    @on(AuditLogRequested)
+    def on_audit_log_requested(self) -> None:
+        """处理审计日志查看请求。"""
+        if self.state._audit_logger:
+            stats = self.state._audit_logger.get_statistics()
+            self.notify(f"Audit Log: {stats['total_executions']} executions, {stats['success_rate']:.1f}% success")
+
+    def refresh_ui(self) -> None:
+        """将全局状态同步到各 UI 面板。
+
+        该方法会统一刷新会话列表、聊天内容、工具开关和模型配置。
+        若当前没有流式输出任务，还会将聊天状态恢复为 Idle。
+        这是应用内部最核心的"状态 -> 视图"同步入口。
+        """
+        session_panel = self.query_one("#session_panel", SessionPanel)
+        chat_panel = self.query_one("#chat_panel", ChatPanel)
+        tools_panel = self.query_one("#tools_panel", ToolsPanel)
+        config_panel = self.query_one("#config_panel", ConfigPanel)
+        skills_panel = self.query_one("#skills_panel", SkillsPanel)
+
+        session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
+        chat_panel.render_messages(self.state.active_session.messages, self.state.active_session_id)
+        if not self.stream_active:
+            chat_panel.set_busy(False, "Idle")
+        tools_panel.refresh_tools(list(self.state.tools.values()))
+        config_panel.load_config(self.state.model_config)
+        skills_panel.refresh_skills(list(self.state.skills.values()))
+        self._update_status_bar()
+
     def on_mirror_selected(self, message: MirrorSelected) -> None:
         """处理模型镜像预设切换。
 
@@ -885,8 +965,13 @@ class NjuCodeApp(App):
         self.call_from_thread(self._finish_stream, session_id, cancelled, error_message)
 
     def _run_analysis_command_and_render(self, command: str) -> None:
-        """执行本地分析命令并将结果回写到聊天视图。"""
-        payload = self.analyzer.run_command(command)
+        """执行本地分析命令并将结果回写到聊天视图。
+
+        Now uses Skills system for command execution.
+        """
+        # Execute via skills system
+        payload = self.state.execute_skill_command(command)
+
         if payload.get("type") == "help":
             commands = payload.get("commands", [])
             text = "[分析命令帮助]\n" + "\n".join(f"- {cmd}" for cmd in commands)
@@ -897,6 +982,7 @@ class NjuCodeApp(App):
                 f"[系统提示] 分析命令失败: {payload.get('error')}",
             )
         else:
+            # Use analyzer's text formatter for output
             text_view = self.analyzer.to_text(payload)
             self.state.append_message("assistant", text_view)
 
@@ -904,3 +990,99 @@ class NjuCodeApp(App):
         self.query_one("#chat_panel", ChatPanel).render_messages(
             self.state.active_session.messages, self.state.active_session_id
         )
+
+    @work(thread=True)
+    def _async_init_mcp_servers(self) -> None:
+        """Initialize MCP server connections in background thread.
+
+        Uses asyncio event loop to connect enabled servers.
+        Reports results via notifications.
+        """
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            if self.state.mcp_manager:
+                results = loop.run_until_complete(
+                    self.state.mcp_manager.connect_all_enabled()
+                )
+
+                connected = [s for s, ok in results.items() if ok]
+                failed = [s for s, ok in results.items() if not ok]
+
+                if connected:
+                    self.call_from_thread(
+                        self.notify, f"MCP servers connected: {', '.join(connected)}"
+                    )
+                if failed:
+                    self.call_from_thread(
+                        self.notify, f"MCP connection failed: {', '.join(failed)}", severity="warning"
+                    )
+
+                # Refresh MCP panel
+                self.call_from_thread(self._refresh_mcp_panel)
+
+        finally:
+            loop.close()
+
+    def _refresh_mcp_panel(self) -> None:
+        """Refresh MCP panel UI after connection changes."""
+        mcp_panel = self.query_one("#mcp_panel", MCPPanel)
+        if self.state.mcp_manager:
+            mcp_panel.refresh_servers(list(self.state.mcp_manager.servers.values()))
+            mcp_panel.refresh_tools(self.state.mcp_manager.list_tools())
+
+    @on(MCPServerConnectRequested)
+    def on_mcp_server_connect_requested(self, message: MCPServerConnectRequested) -> None:
+        """Handle MCP server connect/disconnect request."""
+        import asyncio
+
+        async def _handle():
+            if self.state.mcp_manager:
+                if message.connect:
+                    success = await self.state.mcp_manager.connect_server(message.server_id)
+                    self.call_from_thread(
+                        self.notify,
+                        f"MCP server {message.server_id} {'connected' if success else 'failed to connect'}"
+                    )
+                else:
+                    await self.state.mcp_manager.disconnect_server(message.server_id)
+                    self.call_from_thread(
+                        self.notify, f"MCP server {message.server_id} disconnected"
+                    )
+                self.call_from_thread(self._refresh_mcp_panel)
+
+        # Run in background
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_handle())
+        finally:
+            loop.close()
+
+    @on(MCPToolToggled)
+    def on_mcp_tool_toggled(self, message: MCPToolToggled) -> None:
+        """Handle MCP tool enable/disable toggle."""
+        self.state.update_mcp_tool(message.skill_id, message.enabled)
+        self.state.save()
+        self._refresh_mcp_panel()
+        self.notify(f"MCP tool {message.skill_id} {'enabled' if message.enabled else 'disabled'}")
+
+    @on(MCPServerAddRequested)
+    def on_mcp_server_add_requested(self) -> None:
+        """Handle add MCP server request - shows guidance."""
+        self.notify("Add MCP server config in .nju_code/settings.json under 'mcp.servers' section")
+
+    def on_app_shutdown(self) -> None:
+        """Clean shutdown - disconnect MCP servers and save state."""
+        import asyncio
+
+        if self.state.mcp_manager:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(self.state.mcp_manager.disconnect_all())
+            finally:
+                loop.close()
+
+        self.state.save()
