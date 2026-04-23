@@ -12,12 +12,13 @@ from pathlib import Path
 from typing import List, Optional
 
 from textual.app import ComposeResult
+from textual import on
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Label, ListView, ListItem, Static
 
-from ..skills.models import SkillToggle, SkillStatus
+from frontend.skills.models import SkillToggle, SkillStatus
 
 
 class SkillToggled(Message):
@@ -213,7 +214,3 @@ class SkillsPanel(Vertical):
             skill = event.item.skill_toggle
             new_enabled = not skill.enabled
             self.post_message(SkillToggled(skill.skill_id, new_enabled))
-
-
-# Import on for event handling
-from textual import on
