@@ -18,7 +18,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Label, ListView, ListItem, Static
 
-from frontend.skills.models import SkillToggle, SkillStatus
+from frontend.skills.models import SkillKind, SkillToggle, SkillStatus
 
 
 class SkillToggled(Message):
@@ -53,13 +53,13 @@ class SkillListItem(ListItem):
 
     def compose(self) -> ComposeResult:
         toggle = self.skill_toggle
-        status_icon = "●" if toggle.enabled else "○"
+        status_icon = "[x]" if toggle.enabled else "[ ]"
         status_class = "skill-enabled" if toggle.enabled else "skill-disabled"
 
         yield Horizontal(
             Static(f"{status_icon}", classes=status_class),
             Static(f"{toggle.manifest.name}", classes="skill-name"),
-            Static(f"[{toggle.manifest.category}]", classes="skill-category"),
+            Static(f"({toggle.manifest.category})", classes="skill-category"),
             Static(f"({toggle.usage_count})", classes="skill-usage"),
             classes="skill-item-content",
         )
@@ -102,33 +102,50 @@ class SkillsPanel(Vertical):
         margin-right: 1;
     }
 
+    #agent_skills_list {
+        height: 7;
+    }
+
+    #builtin_skills_list {
+        height: 10;
+    }
+
+    #plugin_skills_list {
+        height: 5;
+    }
+
     ListView {
-        height: auto;
-        max-height: 15;
+        border: round $surface;
     }
 
     .skill-item-content {
+        width: 100%;
         height: 1;
     }
 
     .skill-enabled {
+        width: 4;
         color: $success;
     }
 
     .skill-disabled {
+        width: 4;
         color: $error;
     }
 
     .skill-name {
+        width: 1fr;
         margin-left: 1;
     }
 
     .skill-category {
+        width: 14;
         margin-left: 1;
         color: $text-muted;
     }
 
     .skill-usage {
+        width: 6;
         margin-left: 1;
         color: $accent;
     }
@@ -143,10 +160,13 @@ class SkillsPanel(Vertical):
             yield Button("Install Plugin", id="install_plugin_btn", variant="primary")
             yield Button("Audit Log", id="audit_log_btn", variant="warning")
 
-        yield Label("Built-in Skills", classes="sub-title")
+        yield Label("Agent Skills", id="agent_skills_title", classes="sub-title")
+        yield ListView(id="agent_skills_list")
+
+        yield Label("Command Skills", id="builtin_skills_title", classes="sub-title")
         yield ListView(id="builtin_skills_list")
 
-        yield Label("Installed Plugins", classes="sub-title")
+        yield Label("Installed Plugins", id="plugin_skills_title", classes="sub-title")
         yield ListView(id="plugin_skills_list")
 
         yield Label("", id="skills_stats")
@@ -168,23 +188,51 @@ class SkillsPanel(Vertical):
     def _refresh_lists(self) -> None:
         """Update list views with current skills."""
         builtin_list = self.query_one("#builtin_skills_list", ListView)
+        agent_list = self.query_one("#agent_skills_list", ListView)
         plugin_list = self.query_one("#plugin_skills_list", ListView)
 
         # Clear existing items
+        agent_list.clear()
         builtin_list.clear()
         plugin_list.clear()
 
-        # Separate builtin and plugin skills
-        builtin_skills = [s for s in self.skills if s.manifest.is_builtin]
-        plugin_skills = [s for s in self.skills if not s.manifest.is_builtin]
+        agent_skills = [s for s in self.skills if s.manifest.kind == SkillKind.AGENT]
+        builtin_skills = [
+            s for s in self.skills
+            if s.manifest.is_builtin and s.manifest.kind != SkillKind.AGENT
+        ]
+        plugin_skills = [
+            s for s in self.skills
+            if not s.manifest.is_builtin and s.manifest.kind != SkillKind.AGENT
+        ]
 
-        # Add builtin skills
-        for skill in builtin_skills:
-            builtin_list.append(SkillListItem(skill))
+        self.query_one("#agent_skills_title", Label).update(
+            f"Agent Skills ({len(agent_skills)})"
+        )
+        self.query_one("#builtin_skills_title", Label).update(
+            f"Command Skills ({len(builtin_skills)})"
+        )
+        self.query_one("#plugin_skills_title", Label).update(
+            f"Installed Plugins ({len(plugin_skills)})"
+        )
 
-        # Add plugin skills
-        for skill in plugin_skills:
-            plugin_list.append(SkillListItem(skill))
+        if agent_skills:
+            for skill in agent_skills:
+                agent_list.append(SkillListItem(skill))
+        else:
+            agent_list.append(ListItem(Static("No agent skills loaded")))
+
+        if builtin_skills:
+            for skill in builtin_skills:
+                builtin_list.append(SkillListItem(skill))
+        else:
+            builtin_list.append(ListItem(Static("No command skills loaded")))
+
+        if plugin_skills:
+            for skill in plugin_skills:
+                plugin_list.append(SkillListItem(skill))
+        else:
+            plugin_list.append(ListItem(Static("No plugin skills installed")))
 
     def _update_stats(self) -> None:
         """Update statistics display."""

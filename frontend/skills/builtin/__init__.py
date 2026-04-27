@@ -6,6 +6,7 @@ This module wraps CodeAnalyzer commands into Skills.
 from typing import Any, Dict
 
 from ..models import (
+    SkillKind,
     SkillManifest,
     SkillParameter,
     SkillOutput,
@@ -233,6 +234,90 @@ IMPACT_MANIFEST = SkillManifest(
 )
 
 
+CODEBASE_NAVIGATOR_AGENT = SkillManifest(
+    skill_id="agent.codebase-navigator",
+    name="codebase-navigator",
+    version="1.0.0",
+    description=(
+        "Use when the user asks to understand, inspect, navigate, summarize, or trace a codebase; "
+        "find relevant files, symbols, dependencies, and implementation entry points."
+    ),
+    category="agent",
+    permissions=[],
+    command_aliases=[],
+    is_builtin=True,
+    kind=SkillKind.AGENT,
+    instructions=(
+        "# Codebase Navigator\n\n"
+        "When helping with codebase understanding, first identify the relevant files and symbols before explaining behavior. "
+        "Prefer local analysis commands such as /scan, /search, /symbol, /summary, /deps, /recall, and /impact when they will reduce guesswork. "
+        "Explain the current architecture from concrete files and call out uncertainty when a path was inferred rather than verified. "
+        "Keep the final answer organized around entry points, data flow, and the files the user should read next."
+    ),
+)
+
+CODE_REVIEWER_AGENT = SkillManifest(
+    skill_id="agent.code-reviewer",
+    name="code-reviewer",
+    version="1.0.0",
+    description=(
+        "Use when the user asks for review, bug finding, risk analysis, regression analysis, or whether a code change looks correct."
+    ),
+    category="agent",
+    permissions=[],
+    command_aliases=[],
+    is_builtin=True,
+    kind=SkillKind.AGENT,
+    instructions=(
+        "# Code Reviewer\n\n"
+        "Review code in a findings-first style. Prioritize concrete bugs, behavioral regressions, security issues, broken edge cases, "
+        "and missing tests. For each finding, point to the smallest relevant file/line location and explain why it matters. "
+        "Avoid broad style commentary unless it creates real maintenance or correctness risk. If no issues are found, say that clearly "
+        "and mention residual test gaps."
+    ),
+)
+
+IMPLEMENTATION_PLANNER_AGENT = SkillManifest(
+    skill_id="agent.implementation-planner",
+    name="implementation-planner",
+    version="1.0.0",
+    description=(
+        "Use when the user asks to implement, refactor, fix, or extend code and the change needs a careful multi-step approach."
+    ),
+    category="agent",
+    permissions=[],
+    command_aliases=[],
+    is_builtin=True,
+    kind=SkillKind.AGENT,
+    instructions=(
+        "# Implementation Planner\n\n"
+        "Before editing, inspect the existing patterns and choose the smallest coherent change. Preserve unrelated user edits. "
+        "Separate capability layers clearly: instructions/context, local tools, external MCP tools, UI state, and persistence. "
+        "After implementation, run focused verification that exercises the changed path. Report what changed and what could not be verified."
+    ),
+)
+
+MCP_TOOL_USER_AGENT = SkillManifest(
+    skill_id="agent.mcp-tool-user",
+    name="mcp-tool-user",
+    version="1.0.0",
+    description=(
+        "Use when the user asks to use MCP, connect external tools, call MCP servers, or reason about filesystem, git, memory, fetch, or other MCP tools."
+    ),
+    category="agent",
+    permissions=[],
+    command_aliases=[],
+    is_builtin=True,
+    kind=SkillKind.AGENT,
+    instructions=(
+        "# MCP Tool User\n\n"
+        "Treat MCP servers as tools, not as agent skills. Check whether a server is configured and connected before relying on its tools. "
+        "Use /mcp <mcp.server.tool> with a JSON object for explicit manual calls when needed. If a preset server is disabled or unavailable, "
+        "explain the missing dependency or configuration instead of assuming it worked."
+    ),
+)
+
+
 # All builtin manifests
 BUILTIN_MANIFESTS = [
     HELP_MANIFEST,
@@ -243,6 +328,14 @@ BUILTIN_MANIFESTS = [
     DEPS_MANIFEST,
     RECALL_MANIFEST,
     IMPACT_MANIFEST,
+]
+
+
+BUILTIN_AGENT_MANIFESTS = [
+    CODEBASE_NAVIGATOR_AGENT,
+    CODE_REVIEWER_AGENT,
+    IMPLEMENTATION_PLANNER_AGENT,
+    MCP_TOOL_USER_AGENT,
 ]
 
 

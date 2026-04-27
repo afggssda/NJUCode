@@ -188,6 +188,14 @@ class MCPToolExecutor:
         """
         import asyncio
 
+        manager_loop = getattr(self.manager, "loop", None)
+        if manager_loop and manager_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self.execute(skill_id, params, session_id, context),
+                manager_loop,
+            )
+            return future.result(timeout=60)
+
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():

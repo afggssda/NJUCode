@@ -642,6 +642,7 @@ class CodeAnalyzer:
                     "/deps <relative_path> [--depth 1|2]",
                     "/recall <requirement text> [--top 5..30]",
                     "/impact <symbol_or_relative_path> [--depth 1|2]",
+                    "/mcp <mcp.server.tool> [json-params]",
                 ],
             }
 

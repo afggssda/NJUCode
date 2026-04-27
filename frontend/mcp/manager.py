@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional
 
 from .client import MCPClient
 from .models import MCPServerConfig, MCPConnectionState, MCPTransportType, MCPToolInfo, MCPToolToggle
-from .tool_adapter import MCPToolAdapter
 
 
 class MCPManager:
@@ -37,21 +36,23 @@ class MCPManager:
         self.servers: Dict[str, MCPServerConfig] = {}
         self.clients: Dict[str, MCPClient] = {}
         self.tool_toggles: Dict[str, MCPToolToggle] = {}
-
-        self._tool_adapter = MCPToolAdapter()
+        self.loop: Any = None
 
     def load(self) -> None:
         """Load server configurations from settings.json.
 
         Pattern mirrors SkillRegistry.load() at lines 295-314.
         """
+        self._saved_tool_states = {}
         if not self._settings_path.exists():
+            self._ensure_default_server_presets()
             return
 
         try:
             with open(self._settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
         except Exception:
+            self._ensure_default_server_presets()
             return
 
         mcp_data = settings.get("mcp", {})
@@ -78,6 +79,61 @@ class MCPManager:
         # Load tool toggles (will be populated after connection)
         tools_data = mcp_data.get("tools", {})
         self._saved_tool_states = tools_data  # Store for later application
+        self._ensure_default_server_presets()
+
+    def _ensure_default_server_presets(self) -> None:
+        """Add useful no-autoconnect MCP server presets.
+
+        Presets are visible in the MCP panel but do not auto-connect. Users can
+        enable/connect them after installing the matching command runner.
+        """
+        root = str(self.workspace_root)
+        presets = [
+            MCPServerConfig(
+                server_id="filesystem",
+                name="Filesystem",
+                transport=MCPTransportType.STDIO,
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-filesystem", root],
+                description="Preset: expose this workspace through the official filesystem MCP server.",
+                enabled=True,
+                auto_connect=False,
+            ),
+            MCPServerConfig(
+                server_id="memory",
+                name="Memory",
+                transport=MCPTransportType.STDIO,
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-memory"],
+                description="Preset: persistent local memory MCP server.",
+                enabled=True,
+                auto_connect=False,
+            ),
+            MCPServerConfig(
+                server_id="fetch",
+                name="Fetch",
+                transport=MCPTransportType.STDIO,
+                command="uvx",
+                args=["mcp-server-fetch"],
+                description="Preset: HTTP fetch MCP server via uvx.",
+                enabled=True,
+                auto_connect=False,
+            ),
+            MCPServerConfig(
+                server_id="git",
+                name="Git",
+                transport=MCPTransportType.STDIO,
+                command="uvx",
+                args=["mcp-server-git", "--repository", root],
+                description="Preset: git repository inspection MCP server via uvx.",
+                enabled=True,
+                auto_connect=False,
+            ),
+        ]
+
+        for preset in presets:
+            if preset.server_id not in self.servers:
+                self.servers[preset.server_id] = preset
 
     def save(self) -> None:
         """Save configurations to settings.json.
@@ -173,11 +229,6 @@ class MCPManager:
                 usage_count=saved_tool.get("usage_count", 0),
             )
             self.tool_toggles[tool_info.skill_id] = toggle
-
-            # Convert to SkillManifest
-            tool_info.skill_manifest = self._tool_adapter.convert_to_manifest(
-                tool_info, config
-            )
 
         return True
 

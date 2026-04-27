@@ -52,19 +52,19 @@ class ServerListItem(ListItem):
     def compose(self) -> ComposeResult:
         config = self.config
         state_icon = {
-            MCPConnectionState.CONNECTED: "●",
-            MCPConnectionState.CONNECTING: "◐",
-            MCPConnectionState.DISCONNECTED: "○",
-            MCPConnectionState.ERROR: "✗",
+            MCPConnectionState.CONNECTED: "OK",
+            MCPConnectionState.CONNECTING: "..",
+            MCPConnectionState.DISCONNECTED: "--",
+            MCPConnectionState.ERROR: "!!",
         }
-        icon = state_icon.get(config.connection_state, "○")
+        icon = state_icon.get(config.connection_state, "--")
         color_class = f"state-{config.connection_state.value}"
 
         yield Horizontal(
             Static(icon, classes=color_class),
             Static(config.name, classes="server-name"),
-            Static(f"[{config.transport.value}]", classes="server-transport"),
-            Button(
+            Static(f"({config.transport.value})", classes="server-transport"),
+            Static(
                 "Connect" if config.connection_state != MCPConnectionState.CONNECTED
                 else "Disconnect",
                 id=f"connect_{config.server_id}",
@@ -84,7 +84,7 @@ class ToolListItem(ListItem):
     def compose(self) -> ComposeResult:
         toggle = self.toggle
         info = toggle.tool_info
-        status_icon = "●" if toggle.enabled else "○"
+        status_icon = "[x]" if toggle.enabled else "[ ]"
         status_class = "tool-enabled" if toggle.enabled else "tool-disabled"
 
         yield Horizontal(
@@ -133,32 +133,41 @@ class MCPPanel(Vertical):
         margin-right: 1;
     }
 
+    #servers_list {
+        height: 8;
+    }
+
+    #tools_list {
+        height: 10;
+    }
+
     ListView {
-        height: auto;
-        max-height: 15;
+        border: round $surface;
     }
 
     .server-item {
+        width: 100%;
         height: 1;
     }
 
     .tool-item {
+        width: 100%;
         height: 1;
     }
 
-    .state-connected { color: $success; }
-    .state-connecting { color: $warning; }
-    .state-disconnected { color: $text-muted; }
-    .state-error { color: $error; }
+    .state-connected { width: 4; color: $success; }
+    .state-connecting { width: 4; color: $warning; }
+    .state-disconnected { width: 4; color: $text-muted; }
+    .state-error { width: 4; color: $error; }
 
-    .server-name { margin-left: 1; }
-    .server-transport { margin-left: 1; color: $text-muted; }
-    .connect-btn { margin-left: 1; width: auto; }
+    .server-name { width: 1fr; margin-left: 1; }
+    .server-transport { width: 10; margin-left: 1; color: $text-muted; }
+    .connect-btn { width: 12; margin-left: 1; color: $accent; }
 
-    .tool-enabled { color: $success; }
-    .tool-disabled { color: $text-muted; }
-    .tool-name { margin-left: 1; }
-    .tool-usage { margin-left: 1; color: $accent; }
+    .tool-enabled { width: 4; color: $success; }
+    .tool-disabled { width: 4; color: $text-muted; }
+    .tool-name { width: 1fr; margin-left: 1; }
+    .tool-usage { width: 6; margin-left: 1; color: $accent; }
     """
 
     servers: reactive[list[MCPServerConfig]] = reactive(list)
@@ -172,10 +181,10 @@ class MCPPanel(Vertical):
             yield Button("Connect All", id="connect_all_btn")
             yield Button("Disconnect All", id="disconnect_all_btn", variant="warning")
 
-        yield Label("Server Connections", classes="sub-title")
+        yield Label("Server Connections", id="servers_title", classes="sub-title")
         yield ListView(id="servers_list")
 
-        yield Label("MCP Tools", classes="sub-title")
+        yield Label("MCP Tools", id="tools_title", classes="sub-title")
         yield ListView(id="tools_list")
 
         yield Label("", id="mcp_stats")
@@ -194,8 +203,14 @@ class MCPPanel(Vertical):
         self.servers = servers
         servers_list = self.query_one("#servers_list", ListView)
         servers_list.clear()
-        for config in servers:
-            servers_list.append(ServerListItem(config))
+        self.query_one("#servers_title", Label).update(
+            f"Server Connections ({len(servers)})"
+        )
+        if servers:
+            for config in servers:
+                servers_list.append(ServerListItem(config))
+        else:
+            servers_list.append(ListItem(Static("No MCP servers configured")))
         self._update_stats()
 
     def refresh_tools(self, tools: list[MCPToolToggle]) -> None:
@@ -207,8 +222,13 @@ class MCPPanel(Vertical):
         self.tools = tools
         tools_list = self.query_one("#tools_list", ListView)
         tools_list.clear()
-        for toggle in tools:
-            tools_list.append(ToolListItem(toggle))
+        self.query_one("#tools_title", Label).update(f"MCP Tools ({len(tools)})")
+        if tools:
+            for toggle in tools:
+                tools_list.append(ToolListItem(toggle))
+        else:
+            tools_list.append(ListItem(Static("Connect a server to discover tools")))
+        self._update_stats()
 
     def _refresh_lists(self) -> None:
         """Update list views with current data."""
@@ -218,11 +238,17 @@ class MCPPanel(Vertical):
         servers_list.clear()
         tools_list.clear()
 
-        for config in self.servers:
-            servers_list.append(ServerListItem(config))
+        if self.servers:
+            for config in self.servers:
+                servers_list.append(ServerListItem(config))
+        else:
+            servers_list.append(ListItem(Static("No MCP servers configured")))
 
-        for toggle in self.tools:
-            tools_list.append(ToolListItem(toggle))
+        if self.tools:
+            for toggle in self.tools:
+                tools_list.append(ToolListItem(toggle))
+        else:
+            tools_list.append(ListItem(Static("Connect a server to discover tools")))
 
     def _update_stats(self) -> None:
         """Update statistics display."""

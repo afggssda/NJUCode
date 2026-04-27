@@ -15,13 +15,11 @@ from .models import (
 )
 from .client import MCPClient
 from .manager import MCPManager
-from .tool_adapter import MCPToolAdapter
 from .executor import MCPToolExecutor
 
 __all__ = [
     "MCPClient",
     "MCPManager",
-    "MCPToolAdapter",
     "MCPToolExecutor",
     "MCPConnectionState",
     "MCPServerConfig",

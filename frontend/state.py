@@ -14,7 +14,7 @@ from .skills.registry import SkillRegistry
 from .skills.audit_log import AuditLogger
 from .skills.executor import SkillExecutor
 from .skills.permissions import PermissionChecker
-from .skills.builtin import BUILTIN_MANIFESTS
+from .skills.builtin import BUILTIN_AGENT_MANIFESTS, BUILTIN_MANIFESTS
 from .mcp.manager import MCPManager
 from .mcp.executor import MCPToolExecutor
 from .mcp.models import MCPToolToggle
@@ -329,6 +329,13 @@ class AppState:
         for manifest in BUILTIN_MANIFESTS:
             self.skill_registry.register_skill(manifest)
 
+        # Register built-in Codex-style agent skills
+        for manifest in BUILTIN_AGENT_MANIFESTS:
+            self.skill_registry.register_skill(manifest)
+
+        # Load Codex-style agent skills from .nju_code/skills/*/SKILL.md
+        self.skill_registry.load_agent_skills()
+
         # Load plugins
         self.skill_registry.load_plugins()
 
@@ -337,6 +344,37 @@ class AppState:
 
         # Create permission checker and executor
         self.skills = self.skill_registry.skills
+
+    def build_agent_skill_context(self, query: str, max_skills: int = 3) -> str:
+        """Return selected agent skill instructions for model context."""
+        if not self.skill_registry:
+            return ""
+
+        selected = self.skill_registry.select_agent_skills(query, max_skills=max_skills)
+        if not selected:
+            return ""
+
+        sections: list[str] = [
+            "The following Agent Skills were selected for this user request. "
+            "Use them as procedural guidance, and call tools only when needed."
+        ]
+        for toggle in selected:
+            manifest = toggle.manifest
+            instructions = manifest.instructions
+            if not instructions and manifest.instructions_path:
+                try:
+                    instructions = Path(manifest.instructions_path).read_text(
+                        encoding="utf-8", errors="ignore"
+                    )
+                except OSError:
+                    instructions = ""
+            sections.append(
+                f"## {manifest.name}\n"
+                f"Description: {manifest.description}\n"
+                f"Source: {manifest.instructions_path or 'inline'}\n\n"
+                f"{instructions[:6000]}"
+            )
+        return "\n\n".join(sections)
 
     def execute_skill(
         self,

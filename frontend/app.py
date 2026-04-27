@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import asyncio
+import json
 from pathlib import Path
 import sys
 from threading import Event
@@ -63,6 +65,8 @@ class NjuCodeApp(App):
         self.stream_cancel_event: Event | None = None
         self.stream_session_id: str | None = None
         self.stream_active = False
+        self.mcp_loop: asyncio.AbstractEventLoop | None = None
+        self.mcp_loop_ready = Event()
         self.left_ratio = self.state.left_ratio
         self.right_ratio = self.state.right_ratio
         self.default_chat_ratio = 0.34
@@ -126,16 +130,23 @@ class NjuCodeApp(App):
             scale = max_side_total / side_total
             self.left_ratio *= scale
             self.right_ratio *= scale
-        self.refresh_ui()
-        self._apply_pane_widths()
-        self._update_status_bar()
-
         # Initialize skills system after analyzer is ready
         self.state.init_skills(self.analyzer)
 
         # Initialize MCP system
         self.state.init_mcp()
-        self._async_init_mcp_servers()
+
+        self.refresh_ui()
+        self._apply_pane_widths()
+        self._update_status_bar()
+        if (
+            self.state.mcp_manager
+            and any(
+                server.enabled and server.auto_connect
+                for server in self.state.mcp_manager.servers.values()
+            )
+        ):
+            self._async_init_mcp_servers()
 
     def _detect_git_branch(self) -> str:
         """尝试读取当前工作区 git 分支名。"""
@@ -331,7 +342,7 @@ class NjuCodeApp(App):
                 severity="warning",
             )
 
-    def refresh_ui(self) -> None:
+    def _refresh_ui_legacy(self) -> None:
         """将全局状态同步到各 UI 面板。
 
         该方法会统一刷新会话列表、聊天内容、工具开关、技能和 MCP 配置。
@@ -631,6 +642,10 @@ class NjuCodeApp(App):
                 ),
             )
 
+        skill_context = self.state.build_agent_skill_context(content)
+        if skill_context:
+            file_contexts.insert(0, ("[AGENT-SKILLS]", skill_context))
+
         deduped: list[tuple[str, str]] = []
         seen_labels: set[str] = set()
         for label, text in file_contexts:
@@ -845,6 +860,7 @@ class NjuCodeApp(App):
         tools_panel = self.query_one("#tools_panel", ToolsPanel)
         config_panel = self.query_one("#config_panel", ConfigPanel)
         skills_panel = self.query_one("#skills_panel", SkillsPanel)
+        mcp_panel = self.query_one("#mcp_panel", MCPPanel)
 
         session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
         chat_panel.render_messages(self.state.active_session.messages, self.state.active_session_id)
@@ -853,6 +869,9 @@ class NjuCodeApp(App):
         tools_panel.refresh_tools(list(self.state.tools.values()))
         config_panel.load_config(self.state.model_config)
         skills_panel.refresh_skills(list(self.state.skills.values()))
+        if self.state.mcp_manager:
+            mcp_panel.refresh_servers(list(self.state.mcp_manager.servers.values()))
+            mcp_panel.refresh_tools(self.state.mcp_manager.list_tools())
         self._update_status_bar()
 
     def on_mirror_selected(self, message: MirrorSelected) -> None:
@@ -969,6 +988,36 @@ class NjuCodeApp(App):
 
         Now uses Skills system for command execution.
         """
+        if command == "/mcp" or command.startswith("/mcp "):
+            parts = command.split(maxsplit=2)
+            if len(parts) < 2:
+                self.state.append_message(
+                    "assistant",
+                    "Usage: /mcp <mcp.server.tool> [json-params]",
+                )
+            else:
+                params: dict[str, object] = {}
+                if len(parts) == 3 and parts[2].strip():
+                    try:
+                        parsed = json.loads(parts[2])
+                        if not isinstance(parsed, dict):
+                            raise ValueError("params must be a JSON object")
+                        params = parsed
+                    except Exception as error:
+                        self.state.append_message("assistant", f"[MCP error] {error}")
+                        self.state.save()
+                        self.query_one("#chat_panel", ChatPanel).render_messages(
+                            self.state.active_session.messages, self.state.active_session_id
+                        )
+                        return
+                payload = self.state.execute_mcp_tool(parts[1], params)
+                self.state.append_message("assistant", self.analyzer.to_text(payload))
+            self.state.save()
+            self.query_one("#chat_panel", ChatPanel).render_messages(
+                self.state.active_session.messages, self.state.active_session_id
+            )
+            return
+
         # Execute via skills system
         payload = self.state.execute_skill_command(command)
 
@@ -998,13 +1047,14 @@ class NjuCodeApp(App):
         Uses asyncio event loop to connect enabled servers.
         Reports results via notifications.
         """
-        import asyncio
-
         loop = asyncio.new_event_loop()
+        self.mcp_loop = loop
+        self.mcp_loop_ready.set()
         asyncio.set_event_loop(loop)
 
         try:
             if self.state.mcp_manager:
+                self.state.mcp_manager.loop = loop
                 results = loop.run_until_complete(
                     self.state.mcp_manager.connect_all_enabled()
                 )
@@ -1024,7 +1074,11 @@ class NjuCodeApp(App):
                 # Refresh MCP panel
                 self.call_from_thread(self._refresh_mcp_panel)
 
+            loop.run_forever()
         finally:
+            if self.state.mcp_manager:
+                self.state.mcp_manager.loop = None
+            self.mcp_loop = None
             loop.close()
 
     def _refresh_mcp_panel(self) -> None:
@@ -1037,8 +1091,6 @@ class NjuCodeApp(App):
     @on(MCPServerConnectRequested)
     def on_mcp_server_connect_requested(self, message: MCPServerConnectRequested) -> None:
         """Handle MCP server connect/disconnect request."""
-        import asyncio
-
         async def _handle():
             if self.state.mcp_manager:
                 if message.connect:
@@ -1054,12 +1106,15 @@ class NjuCodeApp(App):
                     )
                 self.call_from_thread(self._refresh_mcp_panel)
 
-        # Run in background
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(_handle())
-        finally:
-            loop.close()
+        if not (self.mcp_loop and self.mcp_loop.is_running()):
+            self.mcp_loop_ready.clear()
+            self._async_init_mcp_servers()
+            self.mcp_loop_ready.wait(2.0)
+
+        if self.mcp_loop and self.mcp_loop.is_running():
+            asyncio.run_coroutine_threadsafe(_handle(), self.mcp_loop)
+        else:
+            self.notify("MCP event loop is not running", severity="warning")
 
     @on(MCPToolToggled)
     def on_mcp_tool_toggled(self, message: MCPToolToggled) -> None:
@@ -1076,13 +1131,14 @@ class NjuCodeApp(App):
 
     def on_app_shutdown(self) -> None:
         """Clean shutdown - disconnect MCP servers and save state."""
-        import asyncio
-
-        if self.state.mcp_manager:
-            loop = asyncio.new_event_loop()
+        if self.state.mcp_manager and self.mcp_loop and self.mcp_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self.state.mcp_manager.disconnect_all(), self.mcp_loop
+            )
             try:
-                loop.run_until_complete(self.state.mcp_manager.disconnect_all())
-            finally:
-                loop.close()
+                future.result(timeout=10)
+            except Exception:
+                pass
+            self.mcp_loop.call_soon_threadsafe(self.mcp_loop.stop)
 
         self.state.save()

@@ -34,6 +34,17 @@ class SkillStatus(Enum):
     PENDING = "pending"
 
 
+class SkillKind(Enum):
+    """High-level skill type.
+
+    Agent skills provide instructions/context for the model. Command skills are
+    executable local actions such as /scan or plugin entry points.
+    """
+    AGENT = "agent"
+    COMMAND = "command"
+    PLUGIN = "plugin"
+
+
 @dataclass
 class SkillParameter:
     """Skill parameter definition for input validation."""
@@ -94,6 +105,11 @@ class SkillManifest:
 
     # Entry point (for external plugins)
     entry_point: Optional[str] = None
+
+    # Skill type and instruction source for agent skills
+    kind: SkillKind = SkillKind.COMMAND
+    instructions_path: Optional[str] = None
+    instructions: str = ""
 
 
 @dataclass

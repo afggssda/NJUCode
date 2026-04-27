@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -298,17 +299,25 @@ class SkillExecutor:
         - /summary path/to/file
         - /deps path --depth 2
         """
-        params = {}
-        parts = command.strip().split()
+        params: dict[str, Any] = {}
+        try:
+            parts = shlex.split(command.strip())
+        except ValueError:
+            parts = command.strip().split()
 
         if len(parts) < 2:
             return params
 
         # First part is command, rest are args
         args = parts[1:]
+        aliases = {
+            "case": "case_sensitive",
+            "regex": "use_regex",
+            "top": "top_k",
+        }
 
-        # Map positional args to parameters
-        positional_idx = 0
+        required_params = [p for p in manifest.parameters if p.required]
+        positional_values: list[str] = []
         i = 0
 
         while i < len(args):
@@ -316,7 +325,7 @@ class SkillExecutor:
 
             # Named parameter (--name value)
             if arg.startswith("--"):
-                name = arg[2:]
+                name = aliases.get(arg[2:], arg[2:])
                 # Handle boolean flags (--case = true)
                 if i + 1 < len(args) and not args[i + 1].startswith("--"):
                     params[name] = args[i + 1]
@@ -325,12 +334,15 @@ class SkillExecutor:
                     params[name] = True
                     i += 1
             else:
-                # Positional parameter
-                param_defs = [p for p in manifest.parameters if p.required]
-                if positional_idx < len(param_defs):
-                    params[param_defs[positional_idx].name] = arg
-                positional_idx += 1
+                positional_values.append(arg)
                 i += 1
+
+        if required_params and positional_values:
+            if len(required_params) == 1:
+                params[required_params[0].name] = " ".join(positional_values)
+            else:
+                for param_def, value in zip(required_params, positional_values):
+                    params[param_def.name] = value
 
         return params
 

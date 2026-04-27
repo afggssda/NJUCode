@@ -68,7 +68,8 @@ class MCPServerConfig:
 class MCPToolInfo:
     """Information about an MCP tool discovered from server.
 
-    Contains the original MCP tool schema and converted skill manifest.
+    Contains the original MCP tool schema. MCP tools stay in the tool layer;
+    agent skills can reference them but they are not agent skills themselves.
     """
     tool_name: str                    # Original MCP tool name
     server_id: str                    # Source server
@@ -78,8 +79,8 @@ class MCPToolInfo:
     input_schema: Dict[str, Any] = field(default_factory=dict)
     description: str = ""
 
-    # Converted skill manifest (for Skills system integration)
-    skill_manifest: Optional[Any] = None  # SkillManifest reference
+    # Optional metadata reserved for future UI/tool adapters.
+    tool_metadata: Optional[Any] = None
 
 
 @dataclass
