@@ -18,6 +18,7 @@ from textual.widgets import TextArea
 from .services.openai_client import OpenAICompatibleClient, OpenAIRequest
 from .services.code_analysis import CodeAnalyzer
 from .services.runtime_tools import run_hello_world
+from .services.context_compressor import ContextCompressor
 from .state import AppState
 from .ui.widgets.chat_panel import ChatPanel, MessageSubmitted, StreamInterruptRequested
 from .ui.widgets.code_viewer_panel import CodeViewerPanel, FileContextAdded
@@ -29,6 +30,9 @@ from .ui.widgets.session_panel import (
     SessionPanel,
     SessionRenameRequested,
     SessionSelected,
+    SessionCompressRequested,
+    SessionExportRequested,
+    SessionImportRequested,
 )
 from .ui.widgets.splitter import SplitterDragEnded, SplitterDragged, VerticalSplitter
 from .ui.widgets.tools_panel import HelloWorldRequested, ToolToggled, ToolsPanel
@@ -62,6 +66,7 @@ class NjuCodeApp(App):
         self.state = AppState(workspace_root=workspace_root)
         self.client = OpenAICompatibleClient()
         self.analyzer = CodeAnalyzer(workspace_root)
+        self.compressor = ContextCompressor(self.client, self.state.model_config)
         self.stream_cancel_event: Event | None = None
         self.stream_session_id: str | None = None
         self.stream_active = False
@@ -357,7 +362,11 @@ class NjuCodeApp(App):
         mcp_panel = self.query_one("#mcp_panel", MCPPanel)
 
         session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
-        chat_panel.render_messages(self.state.active_session.messages, self.state.active_session_id)
+        chat_panel.render_messages(
+            self.state.active_session.messages,
+            self.state.active_session_id,
+            session=self.state.active_session,
+        )
         if not self.stream_active:
             chat_panel.set_busy(False, "Idle")
         tools_panel.refresh_tools(list(self.state.tools.values()))
@@ -373,7 +382,11 @@ class NjuCodeApp(App):
         session_panel = self.query_one("#session_panel", SessionPanel)
         chat_panel = self.query_one("#chat_panel", ChatPanel)
         session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
-        chat_panel.render_messages(self.state.active_session.messages, self.state.active_session_id)
+        chat_panel.render_messages(
+            self.state.active_session.messages,
+            self.state.active_session_id,
+            session=self.state.active_session,
+        )
         if not self.stream_active:
             chat_panel.set_busy(False, "Idle")
 
@@ -695,6 +708,51 @@ class NjuCodeApp(App):
         self.state.save()
         self.refresh_ui()
 
+    def on_session_compress_requested(self, message: SessionCompressRequested) -> None:
+        """响应手动压缩请求：压缩指定会话的历史消息并刷新界面。"""
+        summary = self.state.compress_session(message.session_id, self.compressor)
+        if summary is None:
+            self.notify("消息数量不足，无需压缩。")
+        else:
+            self.notify("历史消息已压缩，摘要已生成。")
+        self.state.save()
+        self.refresh_ui()
+
+    def on_session_export_requested(self, message: SessionExportRequested) -> None:
+        """响应导出请求：将会话导出到 .nju_code/exports/ 目录。"""
+        export_dir = self.state.workspace_root / ".nju_code" / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"session_{message.session_id[:8]}.json"
+        export_path = export_dir / filename
+        try:
+            self.state.export_session(message.session_id, export_path)
+            self.notify(f"会话已导出至: {export_path}")
+        except ValueError as exc:
+            self.notify(f"导出失败: {exc}", severity="error")
+
+    def on_session_import_requested(self, _: SessionImportRequested) -> None:
+        """响应导入请求：从 .nju_code/exports/ 目录导入最新一个会话文件。"""
+        export_dir = self.state.workspace_root / ".nju_code" / "exports"
+        json_files = sorted(
+            export_dir.glob("session_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not json_files:
+            self.notify(
+                "未找到可导入的会话文件（.nju_code/exports/session_*.json）",
+                severity="warning",
+            )
+            return
+        try:
+            session = self.state.import_session(json_files[0])
+            self.state.active_session_id = session.session_id
+            self.state.save()
+            self.refresh_ui()
+            self.notify(f"已导入会话: {session.title}")
+        except ValueError as exc:
+            self.notify(f"导入失败: {exc}", severity="error")
+
     def on_message_submitted(self, message: MessageSubmitted) -> None:
         """处理用户发送消息并启动模型流式回复。
 
@@ -717,7 +775,9 @@ class NjuCodeApp(App):
         self.state.append_message("assistant", "")
         self.state.save()
         self.query_one("#chat_panel", ChatPanel).render_messages(
-            self.state.active_session.messages, self.state.active_session_id
+            self.state.active_session.messages,
+            self.state.active_session_id,
+            session=self.state.active_session,
         )
 
         self.stream_active = True
@@ -727,9 +787,11 @@ class NjuCodeApp(App):
 
         file_contexts = self._build_auto_contexts(message.content)
 
-        # 构建完整的上下文历史传递（排除最后一条临时占位的 assistant）
-        history_msgs = self.state.active_session.messages[:-1]
-        request_messages = [{"role": m.role, "content": m.content} for m in history_msgs]
+        # 用 build_context_messages 构建上下文（含摘要 + 近期消息），排除最后一条占位 assistant
+        history_dicts = self.state.build_context_messages(session_id)
+        if history_dicts and history_dicts[-1].get("role") == "assistant" and not history_dicts[-1].get("content"):
+            history_dicts = history_dicts[:-1]
+        request_messages = history_dicts
 
         request = OpenAIRequest(
             base_url=self.state.model_config.base_url,
@@ -796,7 +858,9 @@ class NjuCodeApp(App):
         self.state.append_message("assistant", result)
         self.state.save()
         self.query_one("#chat_panel", ChatPanel).render_messages(
-            self.state.active_session.messages, self.state.active_session_id
+            self.state.active_session.messages,
+            self.state.active_session_id,
+            session=self.state.active_session,
         )
         self.notify(result)
 
@@ -828,7 +892,9 @@ class NjuCodeApp(App):
 
         self.state.save()
         self.query_one("#chat_panel", ChatPanel).render_messages(
-            self.state.active_session.messages, self.state.active_session_id
+            self.state.active_session.messages,
+            self.state.active_session_id,
+            session=self.state.active_session,
         )
 
     @on(SkillToggled)
@@ -863,7 +929,11 @@ class NjuCodeApp(App):
         mcp_panel = self.query_one("#mcp_panel", MCPPanel)
 
         session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
-        chat_panel.render_messages(self.state.active_session.messages, self.state.active_session_id)
+        chat_panel.render_messages(
+            self.state.active_session.messages,
+            self.state.active_session_id,
+            session=self.state.active_session,
+        )
         if not self.stream_active:
             chat_panel.set_busy(False, "Idle")
         tools_panel.refresh_tools(list(self.state.tools.values()))
@@ -955,8 +1025,12 @@ class NjuCodeApp(App):
 
         if self.state.active_session_id == session_id and target_session is not None:
             chat_panel = self.query_one("#chat_panel", ChatPanel)
-            chat_panel.render_messages(target_session.messages, session_id)
+            chat_panel.render_messages(target_session.messages, session_id, session=target_session)
             chat_panel.set_busy(False, "Idle")
+        # 流结束后检查是否需要自动压缩
+        did_compress = self.state.auto_compress_if_needed(self.compressor)
+        if did_compress:
+            self.notify("上下文过长，已自动压缩历史消息。")
         self.state.save()
 
     @work(thread=True, exclusive=True)
@@ -980,6 +1054,15 @@ class NjuCodeApp(App):
                 cancelled = True
         except Exception as error:
             error_message = str(error)
+
+        # 若中断，保存当前输入内容以便恢复
+        if cancelled:
+            try:
+                input_content = self.query_one("#chat_input", Input).value
+                if input_content.strip():
+                    self.state.mark_interrupted(session_id, input_content)
+            except Exception:
+                pass
 
         self.call_from_thread(self._finish_stream, session_id, cancelled, error_message)
 

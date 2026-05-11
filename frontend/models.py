@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 from uuid import uuid4
 
 
@@ -11,6 +11,7 @@ class ChatMessage:
     role: str
     content: str
     created_at: datetime = field(default_factory=datetime.now)
+    token_count: int = 0
 
 
 @dataclass
@@ -18,6 +19,11 @@ class ChatSession:
     session_id: str = field(default_factory=lambda: str(uuid4()))
     title: str = "New Chat"
     messages: List[ChatMessage] = field(default_factory=list)
+    summary: str = ""
+    compressed_at: Optional[datetime] = None
+    token_estimate: int = 0
+    interrupted: bool = False
+    interrupted_context: Optional[str] = None
 
 
 @dataclass

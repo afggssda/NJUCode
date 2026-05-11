@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from textual import on
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Button, Input, Label, Markdown, Static
 
-from ...models import ChatMessage
+from ...models import ChatMessage, ChatSession
 
 
 class MessageSubmitted(Message):
@@ -37,6 +39,8 @@ class ChatPanel(Vertical):
         """按消息角色构建气泡组件。"""
         if bubble_role == "user":
             return Static(content, classes=f"chat-bubble bubble-{bubble_role}")
+        if bubble_role in ("summary", "compressed"):
+            return Static(content, classes="chat-bubble bubble-summary")
         return Markdown(content, classes=f"chat-bubble bubble-{bubble_role}")
 
     def _message_signature(self, messages: list[ChatMessage]) -> tuple[tuple[str, str, str], ...]:
@@ -54,6 +58,10 @@ class ChatPanel(Vertical):
         messages_view.mount(view)
         return view
 
+    def _build_compressed_divider(self) -> Static:
+        """构建'以上内容已压缩'分隔线组件。"""
+        return Static("── 以上内容已压缩 ──", classes="compressed-divider")
+
     def _build_message_row(self, message: ChatMessage) -> Horizontal:
         """将单条消息构建为行组件。"""
         role = message.role.lower()
@@ -61,6 +69,8 @@ class ChatPanel(Vertical):
 
         if role == "user":
             bubble_role = "user"
+        elif role in ("summary", "compressed"):
+            bubble_role = "summary"
         elif content.startswith("[系统错误]"):
             bubble_role = "error"
         elif content.startswith("[系统提示]"):
@@ -136,11 +146,20 @@ class ChatPanel(Vertical):
         input_widget.focus()
         input_widget.cursor_position = len(input_widget.value)
 
-    def render_messages(self, messages: list[ChatMessage], session_id: str | None = None) -> None:
+    def render_messages(
+        self,
+        messages: list[ChatMessage],
+        session_id: str | None = None,
+        session: Optional[ChatSession] = None,
+    ) -> None:
         """全量重绘消息列表。
 
         Args:
             messages: 需要渲染的会话消息序列。
+            session_id: 当前会话 ID，用于缓存视图。
+            session: 可选的完整 ChatSession 对象；
+                     提供时会在有压缩摘要的会话开头插入分隔线，
+                     并在中断会话恢复时预填输入框。
 
         渲染时根据角色区分左右气泡布局，
         最后自动滚动到底部，确保最新消息可见。
@@ -148,11 +167,19 @@ class ChatPanel(Vertical):
         messages_view = self.query_one("#chat_messages", VerticalScroll)
         sid = session_id or "__default__"
         target_view = self._ensure_session_view(sid)
-        signature = self._message_signature(messages)
+
+        # 签名需要包含摘要变化，防止压缩后不刷新
+        summary_tag = session.summary if session else ""
+        signature = self._message_signature(messages) + (("__summary__", summary_tag, ""),)
 
         if self._session_signatures.get(sid) != signature:
             for child in list(target_view.children):
                 child.remove()
+            # 有摘要时先插入压缩分隔线和摘要气泡
+            if session and session.summary:
+                target_view.mount(self._build_compressed_divider())
+                summary_msg = ChatMessage(role="summary", content=f"【历史摘要】\n{session.summary}")
+                target_view.mount(self._build_message_row(summary_msg))
             for message in messages:
                 target_view.mount(self._build_message_row(message))
             self._session_signatures[sid] = signature
@@ -161,6 +188,16 @@ class ChatPanel(Vertical):
             view.display = current_sid == sid
 
         self._active_session_id = sid
+
+        # 中断恢复：预填输入框
+        if session and session.interrupted and session.interrupted_context:
+            try:
+                input_widget = self.query_one("#chat_input", Input)
+                if not input_widget.value.strip():
+                    input_widget.value = session.interrupted_context
+            except Exception:
+                pass
+
         messages_view.scroll_end(animate=False)
 
     def update_last_message(self, message: ChatMessage) -> None:

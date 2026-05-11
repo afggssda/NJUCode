@@ -50,6 +50,32 @@ class SessionDeleteRequested(Message):
         super().__init__()
 
 
+class SessionCompressRequested(Message):
+    def __init__(self, session_id: str) -> None:
+        """触发手动上下文压缩事件。
+
+        Args:
+            session_id: 需要压缩的会话 ID。
+        """
+        self.session_id = session_id
+        super().__init__()
+
+
+class SessionExportRequested(Message):
+    def __init__(self, session_id: str) -> None:
+        """触发会话导出事件。
+
+        Args:
+            session_id: 需要导出的会话 ID。
+        """
+        self.session_id = session_id
+        super().__init__()
+
+
+class SessionImportRequested(Message):
+    pass
+
+
 class ConfirmDeleteScreen(ModalScreen[bool]):
     def __init__(self, title: str, message: str) -> None:
         """初始化确认弹窗内容。"""
@@ -92,7 +118,8 @@ class SessionPanel(Vertical):
         """构建会话列表与操作区。
 
         包含新建按钮、会话列表、重命名输入框，
-        以及 Rename/Delete 操作按钮。
+        以及 Rename/Delete 操作按钮，
+        以及压缩/导出/导入按钮和 Token 估算标签。
         """
         yield Label("Chats", classes="panel-title")
         yield Button("+ New Chat", id="new_chat_btn", variant="primary")
@@ -101,6 +128,12 @@ class SessionPanel(Vertical):
         with Horizontal(id="session_action_row"):
             yield Button("Rename", id="rename_session_btn")
             yield Button("Delete", id="delete_session_btn", variant="error")
+        with Horizontal(id="session_compress_row"):
+            yield Button("Compress", id="compress_session_btn", variant="warning")
+            yield Button("Export", id="export_session_btn")
+            yield Button("Import", id="import_session_btn")
+        yield Label("", id="session_token_label")
+        yield Label("", id="session_summary_label")
 
     @on(Button.Pressed, "#new_chat_btn")
     def on_new_chat(self) -> None:
@@ -165,6 +198,25 @@ class SessionPanel(Vertical):
         """将删除按钮文案恢复为默认值。"""
         self.query_one("#delete_session_btn", Button).label = "Delete"
 
+    @on(Button.Pressed, "#compress_session_btn")
+    def on_compress_clicked(self) -> None:
+        """处理压缩按钮点击，发出压缩请求事件。"""
+        if not self.selected_session_id:
+            return
+        self.post_message(SessionCompressRequested(self.selected_session_id))
+
+    @on(Button.Pressed, "#export_session_btn")
+    def on_export_clicked(self) -> None:
+        """处理导出按钮点击，发出导出请求事件。"""
+        if not self.selected_session_id:
+            return
+        self.post_message(SessionExportRequested(self.selected_session_id))
+
+    @on(Button.Pressed, "#import_session_btn")
+    def on_import_clicked(self) -> None:
+        """处理导入按钮点击，发出导入请求事件。"""
+        self.post_message(SessionImportRequested())
+
     def refresh_sessions(self, sessions: Iterable[ChatSession], active_session_id: str) -> None:
         """根据最新状态重绘会话列表。
 
@@ -173,20 +225,34 @@ class SessionPanel(Vertical):
             active_session_id: 当前激活会话 ID。
 
         重绘后会同步更新选中状态、重命名输入框与删除确认状态。
+        同时刷新 Token 估算标签与摘要标签。
         """
         list_view = self.query_one("#session_list", ListView)
         list_view.clear()
+        active_session = None
         for session in sessions:
             marker = "●" if session.session_id == active_session_id else "○"
-            item = ListItem(Label(f"{marker} {session.title}"))
+            compressed_mark = " [C]" if session.compressed_at else ""
+            item = ListItem(Label(f"{marker} {session.title}{compressed_mark}"))
             item.session_id = session.session_id
             item.session_title = session.title
             list_view.append(item)
+            if session.session_id == active_session_id:
+                active_session = session
 
         self.selected_session_id = active_session_id
         self.delete_confirm_session_id = None
         self._reset_delete_button()
-        for session in sessions:
-            if session.session_id == active_session_id:
-                self.query_one("#rename_session_input", Input).value = session.title
-                break
+
+        if active_session:
+            self.query_one("#rename_session_input", Input).value = active_session.title
+            token_label = self.query_one("#session_token_label", Label)
+            token_label.update(f"~{active_session.token_estimate} tokens")
+            summary_label = self.query_one("#session_summary_label", Label)
+            if active_session.summary:
+                preview = active_session.summary[:80].replace("\n", " ")
+                if len(active_session.summary) > 80:
+                    preview += "…"
+                summary_label.update(f"摘要: {preview}")
+            else:
+                summary_label.update("")

@@ -4,11 +4,15 @@ from dataclasses import asdict
 from datetime import datetime
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from .services.context_compressor import ContextCompressor
 
 from .models import ChatMessage, ChatSession, DEFAULT_TOOLS, MIRROR_PRESETS, ModelConfig, ToolToggle
 from .services.settings_store import SettingsStore
+from .services.context_compressor import ContextCompressor
 from .skills.models import SkillToggle
 from .skills.registry import SkillRegistry
 from .skills.audit_log import AuditLogger
@@ -124,6 +128,7 @@ class AppState:
                         role=message_data.get("role", "assistant"),
                         content=message_data.get("content", ""),
                         created_at=created_at,
+                        token_count=int(message_data.get("token_count", 0)),
                     )
                 )
 
@@ -132,6 +137,15 @@ class AppState:
                     session_id=session_data.get("session_id", "") or str(uuid4()),
                     title=session_data.get("title", "New Chat"),
                     messages=messages,
+                    summary=session_data.get("summary", ""),
+                    compressed_at=(
+                        datetime.fromisoformat(session_data["compressed_at"])
+                        if session_data.get("compressed_at")
+                        else None
+                    ),
+                    token_estimate=int(session_data.get("token_estimate", 0)),
+                    interrupted=bool(session_data.get("interrupted", False)),
+                    interrupted_context=session_data.get("interrupted_context") or None,
                 )
             )
 
@@ -166,11 +180,17 @@ class AppState:
                 {
                     "session_id": session.session_id,
                     "title": session.title,
+                    "summary": session.summary,
+                    "compressed_at": session.compressed_at.isoformat() if session.compressed_at else None,
+                    "token_estimate": session.token_estimate,
+                    "interrupted": session.interrupted,
+                    "interrupted_context": session.interrupted_context,
                     "messages": [
                         {
                             "role": message.role,
                             "content": message.content,
                             "created_at": message.created_at.isoformat(),
+                            "token_count": message.token_count,
                         }
                         for message in session.messages
                     ],
@@ -284,8 +304,12 @@ class AppState:
         Returns:
             新增的消息对象，便于后续增量更新。
         """
-        message = ChatMessage(role=role, content=content)
+        token_count = max(1, len(content) // 3) + 4
+        message = ChatMessage(role=role, content=content, token_count=token_count)
         self.active_session.messages.append(message)
+        self.active_session.token_estimate = sum(
+            m.token_count for m in self.active_session.messages
+        )
         return message
 
     def update_tool(self, key: str, enabled: bool) -> None:
@@ -498,3 +522,210 @@ class AppState:
         """
         if self.mcp_manager:
             self.mcp_manager.update_tool_status(skill_id, enabled)
+
+
+    def get_token_estimate(self, session_id: str) -> int:
+        """返回指定会话的 token 估算值。
+
+        Args:
+            session_id: 目标会话 ID。
+
+        Returns:
+            已缓存的 token_estimate；若会话不存在返回 0。
+        """
+        for session in self.sessions:
+            if session.session_id == session_id:
+                return session.token_estimate
+        return 0
+
+    def compress_session(
+        self, session_id: str, compressor: "ContextCompressor"
+    ) -> Optional[str]:
+        """对指定会话执行上下文压缩。
+
+        调用 ContextCompressor 生成摘要，裁剪旧消息，
+        并将摘要和压缩时间写回会话对象。
+
+        Args:
+            session_id: 目标会话 ID。
+            compressor: 已配置好模型参数的压缩器实例。
+
+        Returns:
+            压缩成功时返回生成的摘要文本；会话不存在或无需压缩时返回 None。
+        """
+        target: Optional[ChatSession] = None
+        for session in self.sessions:
+            if session.session_id == session_id:
+                target = session
+                break
+        if target is None or not target.messages:
+            return None
+
+        result = compressor.compress(target.messages)
+        if result.removed_count == 0:
+            return None
+
+        target.messages = result.kept_messages
+        target.summary = result.summary
+        target.compressed_at = datetime.now()
+        target.token_estimate = result.token_after
+        return result.summary
+
+    def auto_compress_if_needed(self, compressor: "ContextCompressor") -> bool:
+        """若当前激活会话超过 token 阈值，自动执行压缩。
+
+        Args:
+            compressor: 压缩器实例。
+
+        Returns:
+            True 表示本次执行了压缩；False 表示未触发。
+        """
+        session = self.active_session
+        if not compressor.needs_compression(session.messages):
+            return False
+        self.compress_session(session.session_id, compressor)
+        return True
+
+    def export_session(self, session_id: str, path: "Path") -> None:
+        """将指定会话导出为 JSON 文件。
+
+        Args:
+            session_id: 目标会话 ID。
+            path: 导出目标文件路径。
+
+        Raises:
+            ValueError: 会话不存在时抛出。
+        """
+        target: Optional[ChatSession] = None
+        for session in self.sessions:
+            if session.session_id == session_id:
+                target = session
+                break
+        if target is None:
+            raise ValueError(f"会话不存在: {session_id}")
+
+        session_data = {
+            "session_id": target.session_id,
+            "title": target.title,
+            "summary": target.summary,
+            "compressed_at": target.compressed_at.isoformat() if target.compressed_at else None,
+            "token_estimate": target.token_estimate,
+            "interrupted": target.interrupted,
+            "interrupted_context": target.interrupted_context,
+            "messages": [
+                {
+                    "role": m.role,
+                    "content": m.content,
+                    "created_at": m.created_at.isoformat(),
+                    "token_count": m.token_count,
+                }
+                for m in target.messages
+            ],
+        }
+        self.settings_store.export_session_file(session_data, path)
+
+    def import_session(self, path: "Path") -> ChatSession:
+        """从 JSON 文件恢复会话并追加到会话列表。
+
+        Args:
+            path: 会话 JSON 文件路径。
+
+        Returns:
+            导入后的 ChatSession 对象。
+
+        Raises:
+            ValueError: 文件格式非法时抛出（由 SettingsStore 校验）。
+        """
+        data = self.settings_store.import_session_file(path)
+        messages: List[ChatMessage] = []
+        for msg_data in data.get("messages", []):
+            timestamp = msg_data.get("created_at", "")
+            try:
+                created_at = datetime.fromisoformat(timestamp)
+            except Exception:
+                created_at = datetime.now()
+            messages.append(
+                ChatMessage(
+                    role=msg_data.get("role", "user"),
+                    content=msg_data.get("content", ""),
+                    created_at=created_at,
+                    token_count=int(msg_data.get("token_count", 0)),
+                )
+            )
+
+        compressed_at_raw = data.get("compressed_at")
+        compressed_at: Optional[datetime] = None
+        if compressed_at_raw:
+            try:
+                compressed_at = datetime.fromisoformat(compressed_at_raw)
+            except Exception:
+                compressed_at = None
+
+        session = ChatSession(
+            session_id=str(uuid4()),  # 重新生成 ID 避免冲突
+            title=data.get("title", "Imported Chat"),
+            messages=messages,
+            summary=data.get("summary", ""),
+            compressed_at=compressed_at,
+            token_estimate=int(data.get("token_estimate", 0)),
+            interrupted=False,
+            interrupted_context=None,
+        )
+        self.sessions.append(session)
+        return session
+
+    def mark_interrupted(self, session_id: str, content: str) -> None:
+        """标记会话为中断恢复状态，并保存待发送内容。
+
+        Args:
+            session_id: 目标会话 ID。
+            content: 用户当时输入但未发送成功的内容。
+        """
+        for session in self.sessions:
+            if session.session_id == session_id:
+                session.interrupted = True
+                session.interrupted_context = content
+                break
+
+    def clear_interrupted(self, session_id: str) -> None:
+        """清除会话的中断恢复标记。
+
+        Args:
+            session_id: 目标会话 ID。
+        """
+        for session in self.sessions:
+            if session.session_id == session_id:
+                session.interrupted = False
+                session.interrupted_context = None
+                break
+
+    def build_context_messages(self, session_id: str) -> List[Dict[str, str]]:
+        """构建发送给模型的消息列表。
+
+        若会话存在已压缩摘要，则在首部插入一条 system 消息包含摘要内容，
+        后续跟上当前保留的消息列表，确保模型了解历史背景。
+
+        Args:
+            session_id: 目标会话 ID。
+
+        Returns:
+            可直接传入 OpenAIRequest.messages 的字典列表。
+        """
+        target: Optional[ChatSession] = None
+        for session in self.sessions:
+            if session.session_id == session_id:
+                target = session
+                break
+        if target is None:
+            return []
+
+        result: List[Dict[str, str]] = []
+        if target.summary:
+            result.append(
+                {
+                    "role": "system",
+                    "content": f"【历史对话摘要】\n{target.summary}",
+                }
+            )
+        result.extend({"role": m.role, "content": m.content} for m in target.messages)
+        return result
