@@ -30,7 +30,6 @@ from .ui.widgets.session_panel import (
     SessionPanel,
     SessionRenameRequested,
     SessionSelected,
-    SessionCompressRequested,
     SessionExportRequested,
     SessionImportRequested,
 )
@@ -125,6 +124,8 @@ class NjuCodeApp(App):
         该方法确保用户打开程序时看到的是可直接交互的稳定界面。
         """
         self.state.load()
+        # 使用当前双语估算器重新计算所有会话的 token 数，保持一致性
+        self.state.recalculate_token_estimates(self.compressor)
         self.left_ratio = self.state.left_ratio
         self.right_ratio = self.state.right_ratio
         self.left_visible = self.left_ratio >= self.left_show_ratio
@@ -361,7 +362,11 @@ class NjuCodeApp(App):
         skills_panel = self.query_one("#skills_panel", SkillsPanel)
         mcp_panel = self.query_one("#mcp_panel", MCPPanel)
 
-        session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
+        session_panel.refresh_sessions(
+            self.state.sessions,
+            self.state.active_session_id,
+            token_threshold=self.compressor.token_threshold,
+        )
         chat_panel.render_messages(
             self.state.active_session.messages,
             self.state.active_session_id,
@@ -381,7 +386,11 @@ class NjuCodeApp(App):
         """仅刷新当前会话相关视图，减少切换会话时的闪烁。"""
         session_panel = self.query_one("#session_panel", SessionPanel)
         chat_panel = self.query_one("#chat_panel", ChatPanel)
-        session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
+        session_panel.refresh_sessions(
+            self.state.sessions,
+            self.state.active_session_id,
+            token_threshold=self.compressor.token_threshold,
+        )
         chat_panel.render_messages(
             self.state.active_session.messages,
             self.state.active_session_id,
@@ -708,48 +717,74 @@ class NjuCodeApp(App):
         self.state.save()
         self.refresh_ui()
 
-    def on_session_compress_requested(self, message: SessionCompressRequested) -> None:
-        """响应手动压缩请求：压缩指定会话的历史消息并刷新界面。"""
-        summary = self.state.compress_session(message.session_id, self.compressor)
-        if summary is None:
-            self.notify("消息数量不足，无需压缩。")
-        else:
-            self.notify("历史消息已压缩，摘要已生成。")
-        self.state.save()
-        self.refresh_ui()
+    def on_session_compress_requested(self, message: SessionCompressRequested) -> None:  # type: ignore[name-defined]
+        """已移除手动压缩入口，保留空处理器避免旧版事件报错。"""
+
+    def _maybe_auto_title_session(self, session_id: str) -> None:
+        """若消息提交后会话标题仍为默认样式，自动从首条用户消息生成标题。
+
+        该方法在用户发送消息后反应式调用，确保会话标题能遗留语义信息。
+        只对标题未被手动修改的会话执行（即仍为 'New Chat' 或 'Chat N'）。
+
+        Args:
+            session_id: 目标会话 ID。
+        """
+        updated = self.state.auto_title_session(session_id)
+        if updated:
+            self.state.save()
+            # 仅刷新会话列表，无需全量刷新
+            try:
+                session_panel = self.query_one("#session_panel", SessionPanel)
+                session_panel.refresh_sessions(
+                    self.state.sessions,
+                    self.state.active_session_id,
+                    token_threshold=self.compressor.token_threshold,
+                )
+            except Exception:
+                pass
 
     def on_session_export_requested(self, message: SessionExportRequested) -> None:
-        """响应导出请求：将会话导出到 .nju_code/exports/ 目录。"""
+        """响应导出请求：将会话导出到 .nju_code/exports/ 目录。
+
+        导出成功后自动清理过旧的导出文件（保留最近 20 个）。
+        """
         export_dir = self.state.workspace_root / ".nju_code" / "exports"
         export_dir.mkdir(parents=True, exist_ok=True)
         filename = f"session_{message.session_id[:8]}.json"
         export_path = export_dir / filename
         try:
             self.state.export_session(message.session_id, export_path)
-            self.notify(f"会话已导出至: {export_path}")
+            # 导出后清理过旧文件
+            cleaned = self.state.settings_store.cleanup_old_exports(keep_count=20)
+            notice = f"会话已导出至: {export_path.name}"
+            if cleaned > 0:
+                notice += f"（已清理 {cleaned} 个旧导出文件）"
+            self.notify(notice)
         except ValueError as exc:
             self.notify(f"导出失败: {exc}", severity="error")
 
     def on_session_import_requested(self, _: SessionImportRequested) -> None:
-        """响应导入请求：从 .nju_code/exports/ 目录导入最新一个会话文件。"""
-        export_dir = self.state.workspace_root / ".nju_code" / "exports"
-        json_files = sorted(
-            export_dir.glob("session_*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if not json_files:
+        """响应导入请求：从 .nju_code/exports/ 目录导入最新一个会话文件。
+
+        使用 SettingsStore.list_export_files() 获取带元数据的文件列表，
+        选取最新的文件进行导入。导入后自动切换到新会话。
+        """
+        export_files = self.state.settings_store.list_export_files()
+        if not export_files:
             self.notify(
                 "未找到可导入的会话文件（.nju_code/exports/session_*.json）",
                 severity="warning",
             )
             return
+        # list_export_files 已按修改时间倒序排列，直接取第一个
+        latest_path, latest_mtime, latest_title = export_files[0]
         try:
-            session = self.state.import_session(json_files[0])
+            session = self.state.import_session(latest_path)
             self.state.active_session_id = session.session_id
             self.state.save()
             self.refresh_ui()
-            self.notify(f"已导入会话: {session.title}")
+            title_hint = latest_title or session.title
+            self.notify(f"已导入会话: {title_hint}")
         except ValueError as exc:
             self.notify(f"导入失败: {exc}", severity="error")
 
@@ -766,6 +801,8 @@ class NjuCodeApp(App):
 
         session_id = self.state.active_session_id
         self.state.append_message("user", message.content)
+        # 第一条消息提交后尝试自动生成会话标题
+        self._maybe_auto_title_session(session_id)
 
         # Local analysis commands are executed in-process and do not call the model API.
         if message.content.strip().startswith("/"):
@@ -928,7 +965,11 @@ class NjuCodeApp(App):
         skills_panel = self.query_one("#skills_panel", SkillsPanel)
         mcp_panel = self.query_one("#mcp_panel", MCPPanel)
 
-        session_panel.refresh_sessions(self.state.sessions, self.state.active_session_id)
+        session_panel.refresh_sessions(
+            self.state.sessions,
+            self.state.active_session_id,
+            token_threshold=self.compressor.token_threshold,
+        )
         chat_panel.render_messages(
             self.state.active_session.messages,
             self.state.active_session_id,
@@ -994,6 +1035,7 @@ class NjuCodeApp(App):
             if not session.messages:
                 return
             session.messages[-1].content += chunk
+            self.state.sync_session_tokens(session_id, message_index=-1)
             if self.state.active_session_id == session_id:
                 self.query_one("#chat_panel", ChatPanel).update_last_message(session.messages[-1])
             return
@@ -1023,6 +1065,9 @@ class NjuCodeApp(App):
             else:
                 target_session.messages[-1].content += "\n[输出已中断]"
 
+        if target_session and target_session.messages:
+            self.state.sync_session_tokens(session_id, message_index=-1)
+
         if self.state.active_session_id == session_id and target_session is not None:
             chat_panel = self.query_one("#chat_panel", ChatPanel)
             chat_panel.render_messages(target_session.messages, session_id, session=target_session)
@@ -1030,7 +1075,11 @@ class NjuCodeApp(App):
         # 流结束后检查是否需要自动压缩
         did_compress = self.state.auto_compress_if_needed(self.compressor)
         if did_compress:
-            self.notify("上下文过长，已自动压缩历史消息。")
+            session = self.state.active_session
+            ratio_pct = int((1.0 - session.token_estimate / max(session.last_compressed_token_count, 1)) * 100)
+            self.notify(
+                f"上下文过长，已自动压缩（此前 ~{session.last_compressed_token_count} tokens）。"
+            )
         self.state.save()
 
     @work(thread=True, exclusive=True)

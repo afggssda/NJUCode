@@ -146,6 +146,10 @@ class AppState:
                     token_estimate=int(session_data.get("token_estimate", 0)),
                     interrupted=bool(session_data.get("interrupted", False)),
                     interrupted_context=session_data.get("interrupted_context") or None,
+                    compression_count=int(session_data.get("compression_count", 0)),
+                    last_compressed_token_count=int(
+                        session_data.get("last_compressed_token_count", 0)
+                    ),
                 )
             )
 
@@ -185,6 +189,8 @@ class AppState:
                     "token_estimate": session.token_estimate,
                     "interrupted": session.interrupted,
                     "interrupted_context": session.interrupted_context,
+                    "compression_count": session.compression_count,
+                    "last_compressed_token_count": session.last_compressed_token_count,
                     "messages": [
                         {
                             "role": message.role,
@@ -304,13 +310,59 @@ class AppState:
         Returns:
             新增的消息对象，便于后续增量更新。
         """
-        token_count = max(1, len(content) // 3) + 4
+        token_count = ContextCompressor.estimate_message_tokens_from_content(content)
         message = ChatMessage(role=role, content=content, token_count=token_count)
         self.active_session.messages.append(message)
-        self.active_session.token_estimate = sum(
-            m.token_count for m in self.active_session.messages
-        )
+        self._refresh_session_token_cache(self.active_session, message_index=-1)
         return message
+
+    def _refresh_session_token_cache(
+        self,
+        session: ChatSession,
+        message_index: Optional[int] = None,
+    ) -> None:
+        """按当前内容刷新会话内消息 token 与总估算缓存。
+
+        Args:
+            session: 待刷新的会话对象。
+            message_index: 指定仅刷新某一条消息；None 表示全量刷新。
+        """
+        if message_index is None:
+            for message in session.messages:
+                message.token_count = ContextCompressor.estimate_message_tokens_from_content(
+                    message.content
+                )
+        elif session.messages:
+            normalized_index = message_index
+            if normalized_index < 0:
+                normalized_index += len(session.messages)
+            if 0 <= normalized_index < len(session.messages):
+                target_message = session.messages[normalized_index]
+                target_message.token_count = ContextCompressor.estimate_message_tokens_from_content(
+                    target_message.content
+                )
+
+        session.token_estimate = sum(message.token_count for message in session.messages)
+        if session.summary:
+            session.token_estimate += ContextCompressor.estimate_text_tokens_static(
+                session.summary
+            )
+
+    def sync_session_tokens(
+        self,
+        session_id: str,
+        message_index: Optional[int] = None,
+    ) -> None:
+        """按消息当前内容刷新会话 token 缓存。
+
+        Args:
+            session_id: 目标会话 ID。
+            message_index: 指定仅刷新某一条消息；None 表示全量刷新。
+        """
+        target = self.get_session_by_id(session_id)
+        if target is None:
+            return
+        self._refresh_session_token_cache(target, message_index)
 
     def update_tool(self, key: str, enabled: bool) -> None:
         """更新工具开关状态。
@@ -538,13 +590,198 @@ class AppState:
                 return session.token_estimate
         return 0
 
+    def get_session_by_id(self, session_id: str) -> Optional[ChatSession]:
+        """根据 ID 查找会话对象。
+
+        Args:
+            session_id: 目标会话 ID。
+
+        Returns:
+            找到的 ChatSession；不存在时返回 None。
+        """
+        for session in self.sessions:
+            if session.session_id == session_id:
+                return session
+        return None
+
+    def get_session_stats(self, session_id: str) -> Dict[str, Any]:
+        """返回指定会话的详细统计信息字典。
+
+        统计项包括：
+        - message_count: 消息总数
+        - user_message_count: 用户消息数
+        - assistant_message_count: 助手消息数
+        - token_estimate: token 估算值
+        - compression_count: 历史压缩次数
+        - has_summary: 是否有已生成摘要
+        - summary_length: 摘要字符数
+        - compressed_at_str: 最近压缩时间的格式化字符串（无则为空）
+        - first_message_at: 最早消息时间（ISO 格式，无消息则为空）
+        - last_message_at: 最新消息时间（ISO 格式，无消息则为空）
+        - avg_message_length: 消息平均字符数（含双端，无消息则为 0）
+
+        Args:
+            session_id: 目标会话 ID。
+
+        Returns:
+            统计字典；会话不存在时返回空字典。
+        """
+        target = self.get_session_by_id(session_id)
+        if target is None:
+            return {}
+
+        user_msgs = [m for m in target.messages if m.role == "user"]
+        assistant_msgs = [m for m in target.messages if m.role == "assistant"]
+        all_lengths = [len(m.content) for m in target.messages if m.content]
+        avg_len = int(sum(all_lengths) / len(all_lengths)) if all_lengths else 0
+
+        first_at = ""
+        last_at = ""
+        if target.messages:
+            first_at = target.messages[0].created_at.isoformat()
+            last_at = target.messages[-1].created_at.isoformat()
+
+        return {
+            "message_count": len(target.messages),
+            "user_message_count": len(user_msgs),
+            "assistant_message_count": len(assistant_msgs),
+            "token_estimate": target.token_estimate,
+            "compression_count": target.compression_count,
+            "has_summary": bool(target.summary),
+            "summary_length": len(target.summary),
+            "compressed_at_str": (
+                target.compressed_at.strftime("%Y-%m-%d %H:%M")
+                if target.compressed_at
+                else ""
+            ),
+            "first_message_at": first_at,
+            "last_message_at": last_at,
+            "avg_message_length": avg_len,
+        }
+
+    def recalculate_token_estimates(self, compressor: "ContextCompressor") -> None:
+        """重新计算所有会话的 token 估算值并刷新缓存。
+
+        在加载设置后或压缩策略变化后调用，确保 token_estimate 与
+        实际消息内容保持一致（旧版本保存的估算值可能使用旧算法）。
+
+        Args:
+            compressor: 压缩器实例，用于调用最新的 estimate_tokens 方法。
+        """
+        for session in self.sessions:
+            for message in session.messages:
+                message.token_count = compressor.estimate_message_tokens(message)
+            calculated = sum(message.token_count for message in session.messages)
+            if session.summary:
+                calculated += compressor.estimate_text_tokens(session.summary)
+            session.token_estimate = calculated
+
+    def auto_title_session(self, session_id: str, max_chars: int = 30) -> bool:
+        """从会话第一条用户消息自动生成简短标题。
+
+        仅在以下条件同时满足时执行：
+        1. 会话存在且至少有一条用户消息
+        2. 当前标题仍为默认格式（'New Chat' 或 'Chat N'）
+
+        从第一条用户消息内容中取前 max_chars 个字符作为标题，
+        去除首尾空白和换行符，以 '…' 截断过长内容。
+
+        Args:
+            session_id: 目标会话 ID。
+            max_chars: 标题最大字符数，默认 30。
+
+        Returns:
+            True 表示标题已更新；False 表示未满足条件或无需更新。
+        """
+        target = self.get_session_by_id(session_id)
+        if target is None:
+            return False
+
+        current = target.title.strip()
+        # 仅对默认标题（New Chat 或 Chat N）执行自动命名
+        is_default = current == "New Chat" or (
+            current.startswith("Chat ") and current[5:].strip().isdigit()
+        )
+        if not is_default:
+            return False
+
+        user_messages = [m for m in target.messages if m.role == "user" and m.content.strip()]
+        if not user_messages:
+            return False
+
+        raw = user_messages[0].content.strip().replace("\n", " ")
+        # 去掉以 '/' 开头的命令消息（分析命令不应作为标题）
+        if raw.startswith("/"):
+            return False
+
+        title = raw[:max_chars]
+        if len(raw) > max_chars:
+            title = title.rstrip() + "…"
+        target.title = title
+        return True
+
+    def prune_empty_sessions(self) -> int:
+        """清除没有任何消息的会话（默认会话除外）。
+
+        若清除后会话列表为空，保留当前激活会话（即使是空会话）。
+        若激活会话被清除，自动切换到剩余列表中第一项。
+
+        Returns:
+            被清除的空会话数量。
+        """
+        if len(self.sessions) <= 1:
+            return 0
+
+        active_id = self.active_session_id
+        non_empty = [
+            s for s in self.sessions
+            if s.messages or s.session_id == active_id
+        ]
+        removed = len(self.sessions) - len(non_empty)
+        if removed > 0:
+            self.sessions = non_empty if non_empty else self.sessions[:1]
+            if not any(s.session_id == self.active_session_id for s in self.sessions):
+                self.active_session_id = self.sessions[0].session_id
+        return removed
+
+    def clone_session(self, session_id: str) -> Optional[ChatSession]:
+        """克隆一个会话（复制所有消息和摘要，生成新 ID）。
+
+        克隆的会话会被追加到会话列表末尾，但不会自动切换激活。
+
+        Args:
+            session_id: 待克隆的会话 ID。
+
+        Returns:
+            新创建的 ChatSession 克隆；原会话不存在时返回 None。
+        """
+        source = self.get_session_by_id(session_id)
+        if source is None:
+            return None
+
+        from copy import deepcopy
+        cloned = ChatSession(
+            title=f"{source.title} (副本)",
+            messages=deepcopy(source.messages),
+            summary=source.summary,
+            compressed_at=source.compressed_at,
+            token_estimate=source.token_estimate,
+            interrupted=False,
+            interrupted_context=None,
+            compression_count=source.compression_count,
+            last_compressed_token_count=source.last_compressed_token_count,
+        )
+        self.sessions.append(cloned)
+        return cloned
+
     def compress_session(
         self, session_id: str, compressor: "ContextCompressor"
     ) -> Optional[str]:
         """对指定会话执行上下文压缩。
 
         调用 ContextCompressor 生成摘要，裁剪旧消息，
-        并将摘要和压缩时间写回会话对象。
+        并将摘要、压缩时间及统计字段写回会话对象。
+        支持增量压缩：若会话已有摘要，传入旧摘要以生成合并摘要。
 
         Args:
             session_id: 目标会话 ID。
@@ -553,26 +790,32 @@ class AppState:
         Returns:
             压缩成功时返回生成的摘要文本；会话不存在或无需压缩时返回 None。
         """
-        target: Optional[ChatSession] = None
-        for session in self.sessions:
-            if session.session_id == session_id:
-                target = session
-                break
+        target = self.get_session_by_id(session_id)
         if target is None or not target.messages:
             return None
 
-        result = compressor.compress(target.messages)
+        # 传入已有摘要实现增量压缩，传入会话标题优化摘要质量
+        result = compressor.compress(
+            target.messages,
+            existing_summary=target.summary or None,
+            session_title=target.title,
+        )
         if result.removed_count == 0:
             return None
 
+        target.last_compressed_token_count = result.token_before
         target.messages = result.kept_messages
         target.summary = result.summary
-        target.compressed_at = datetime.now()
-        target.token_estimate = result.token_after
+        target.compressed_at = result.generated_at
+        target.compression_count += 1
+        self._refresh_session_token_cache(target)
         return result.summary
 
     def auto_compress_if_needed(self, compressor: "ContextCompressor") -> bool:
         """若当前激活会话超过 token 阈值，自动执行压缩。
+
+        已在最近一次保存后被压缩过且 token 未再次超限的会话不会重复压缩，
+        避免频繁触发对同一批消息的重复摘要请求。
 
         Args:
             compressor: 压缩器实例。
@@ -583,8 +826,8 @@ class AppState:
         session = self.active_session
         if not compressor.needs_compression(session.messages):
             return False
-        self.compress_session(session.session_id, compressor)
-        return True
+        summary = self.compress_session(session.session_id, compressor)
+        return summary is not None
 
     def export_session(self, session_id: str, path: "Path") -> None:
         """将指定会话导出为 JSON 文件。
@@ -612,6 +855,8 @@ class AppState:
             "token_estimate": target.token_estimate,
             "interrupted": target.interrupted,
             "interrupted_context": target.interrupted_context,
+            "compression_count": target.compression_count,
+            "last_compressed_token_count": target.last_compressed_token_count,
             "messages": [
                 {
                     "role": m.role,
@@ -670,7 +915,18 @@ class AppState:
             token_estimate=int(data.get("token_estimate", 0)),
             interrupted=False,
             interrupted_context=None,
+            compression_count=int(data.get("compression_count", 0)),
+            last_compressed_token_count=int(data.get("last_compressed_token_count", 0)),
         )
+        # 防止重复导入：若已有同标题同消息数的会话则不追加
+        for existing in self.sessions:
+            if (
+                existing.title == session.title
+                and len(existing.messages) == len(session.messages)
+                and existing.summary == session.summary
+            ):
+                return existing
+        self._refresh_session_token_cache(session)
         self.sessions.append(session)
         return session
 
@@ -700,10 +956,12 @@ class AppState:
                 break
 
     def build_context_messages(self, session_id: str) -> List[Dict[str, str]]:
-        """构建发送给模型的消息列表。
+        """构建发送给模型的消息列表，正确处理摘要前缀和角色过滤。
 
         若会话存在已压缩摘要，则在首部插入一条 system 消息包含摘要内容，
         后续跟上当前保留的消息列表，确保模型了解历史背景。
+        同时过滤掉仅在 UI 中展示的内部角色（'summary'、'compressed'），
+        以及内容为空的占位消息（除最后一条 assistant 消息外）。
 
         Args:
             session_id: 目标会话 ID。
@@ -711,11 +969,7 @@ class AppState:
         Returns:
             可直接传入 OpenAIRequest.messages 的字典列表。
         """
-        target: Optional[ChatSession] = None
-        for session in self.sessions:
-            if session.session_id == session_id:
-                target = session
-                break
+        target = self.get_session_by_id(session_id)
         if target is None:
             return []
 
@@ -724,8 +978,22 @@ class AppState:
             result.append(
                 {
                     "role": "system",
-                    "content": f"【历史对话摘要】\n{target.summary}",
+                    "content": (
+                        "以下是本次会话的历史对话摘要，请在后续回复中以此为背景参考：\n"
+                        f"{target.summary}"
+                    ),
                 }
             )
-        result.extend({"role": m.role, "content": m.content} for m in target.messages)
+
+        valid_roles = {"user", "assistant", "system", "tool"}
+        msgs = target.messages
+        for i, m in enumerate(msgs):
+            # 过滤 UI 专用角色
+            if m.role.lower() not in valid_roles:
+                continue
+            # 允许最后一条 assistant 消息为空（流式占位），其余空内容跳过
+            is_last = i == len(msgs) - 1
+            if not m.content.strip() and not (is_last and m.role == "assistant"):
+                continue
+            result.append({"role": m.role, "content": m.content})
         return result
