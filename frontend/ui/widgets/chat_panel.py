@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from textual import on
@@ -29,26 +30,104 @@ class StreamInterruptRequested(Message):
 
 class ChatPanel(Vertical):
     def __init__(self, **kwargs):
-        """初始化聊天面板缓存。"""
+        """初始化聊天面板缓存。
+
+        缓存各会话的 Vertical 容器与消息签名，
+        避免切换会话时频繁重建 DOM 节点，减少闪烁。
+        """
         super().__init__(**kwargs)
         self._session_views: dict[str, Vertical] = {}
-        self._session_signatures: dict[str, tuple[tuple[str, str, str], ...]] = {}
-        self._active_session_id: str | None = None
+        self._session_signatures: dict[str, tuple] = {}
+        self._active_session_id: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # 辅助方法
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_message_time(dt: datetime) -> str:
+        """将消息时间格式化为简短时间字符串。
+
+        同一天内只显示 HH:MM，其他日期显示 MM-DD HH:MM。
+
+        Args:
+            dt: 消息创建时间。
+
+        Returns:
+            格式化后的时间字符串。
+        """
+        now = datetime.now()
+        if dt.date() == now.date():
+            return dt.strftime("%H:%M")
+        return dt.strftime("%m-%d %H:%M")
+
+    @staticmethod
+    def _format_compression_info(session: ChatSession) -> str:
+        """格式化压缩分隔线的附加信息文本。
+
+        Args:
+            session: 当前会话对象。
+
+        Returns:
+            形如 '共压缩 2 次 · 最近: 2026-05-11 14:32 · 节省 ~800 tokens' 的字符串；
+            无压缩记录时返回空字符串。
+        """
+        parts = []
+        if session.compression_count > 0:
+            parts.append(f"共压缩 {session.compression_count} 次")
+        if session.compressed_at:
+            ts = session.compressed_at.strftime("%Y-%m-%d %H:%M")
+            parts.append(f"最近: {ts}")
+        if session.last_compressed_token_count > 0 and session.token_estimate > 0:
+            saved = session.last_compressed_token_count - session.token_estimate
+            if saved > 0:
+                parts.append(f"节省 ~{saved} tokens")
+        return " · ".join(parts)
 
     def _build_bubble(self, bubble_role: str, content: str):
-        """按消息角色构建气泡组件。"""
+        """按消息角色构建气泡组件。
+
+        Args:
+            bubble_role: 气泡类型标识，支持 'user'、'assistant'、
+                         'error'、'system'、'summary'、'compressed'。
+            content: 气泡内的文本内容。
+
+        Returns:
+            对应角色的 Static 或 Markdown 组件。
+        """
         if bubble_role == "user":
             return Static(content, classes=f"chat-bubble bubble-{bubble_role}")
         if bubble_role in ("summary", "compressed"):
             return Static(content, classes="chat-bubble bubble-summary")
+        if bubble_role in ("error", "system"):
+            return Static(content, classes=f"chat-bubble bubble-{bubble_role}")
         return Markdown(content, classes=f"chat-bubble bubble-{bubble_role}")
 
-    def _message_signature(self, messages: list[ChatMessage]) -> tuple[tuple[str, str, str], ...]:
-        """构建消息签名用于判断是否需要重绘。"""
+    def _message_signature(
+        self, messages: list[ChatMessage]
+    ) -> tuple[tuple[str, str, str], ...]:
+        """构建消息列表的签名用于缓存判断。
+
+        签名由每条消息的 (role, content, created_at) 三元组组成，
+        用于判断消息是否发生变化，避免不必要的 DOM 重建。
+
+        Args:
+            messages: 当前会话消息列表。
+
+        Returns:
+            不可变元组签名。
+        """
         return tuple((m.role, m.content, m.created_at.isoformat()) for m in messages)
 
     def _ensure_session_view(self, session_id: str) -> Vertical:
-        """获取或创建指定会话的消息容器。"""
+        """获取或创建指定会话的消息容器。
+
+        Args:
+            session_id: 目标会话 ID。
+
+        Returns:
+            已挂载到 #chat_messages 中的 Vertical 容器。
+        """
         if session_id in self._session_views:
             return self._session_views[session_id]
 
@@ -58,12 +137,34 @@ class ChatPanel(Vertical):
         messages_view.mount(view)
         return view
 
-    def _build_compressed_divider(self) -> Static:
-        """构建'以上内容已压缩'分隔线组件。"""
-        return Static("── 以上内容已压缩 ──", classes="compressed-divider")
+    def _build_compressed_divider(self, session: Optional[ChatSession] = None) -> Static:
+        """构建'以上内容已压缩'分隔线组件。
+
+        若传入 session 对象，会在分隔线中附加压缩次数和时间信息，
+        帮助用户了解当前上下文被压缩的程度。
+
+        Args:
+            session: 当前会话对象（可选）。
+
+        Returns:
+            包含压缩信息的 Static 分隔线组件。
+        """
+        base = "── 以上内容已压缩 ──"
+        if session:
+            info = self._format_compression_info(session)
+            if info:
+                base = f"── 以上内容已压缩 · {info} ──"
+        return Static(base, classes="compressed-divider")
 
     def _build_message_row(self, message: ChatMessage) -> Horizontal:
-        """将单条消息构建为行组件。"""
+        """将单条消息构建为行组件。
+
+        Args:
+            message: 目标消息对象。
+
+        Returns:
+            包含气泡的 Horizontal 行组件。
+        """
         role = message.role.lower()
         content = message.content or " "
 
@@ -168,17 +269,24 @@ class ChatPanel(Vertical):
         sid = session_id or "__default__"
         target_view = self._ensure_session_view(sid)
 
-        # 签名需要包含摘要变化，防止压缩后不刷新
+        # 构建复合签名：消息内容 + 摘要内容 + 压缩次数（任一变化都触发重绘）
         summary_tag = session.summary if session else ""
-        signature = self._message_signature(messages) + (("__summary__", summary_tag, ""),)
+        compression_tag = str(session.compression_count) if session else ""
+        signature: tuple = (
+            self._message_signature(messages)
+            + (("__summary__", summary_tag, compression_tag),)
+        )
 
         if self._session_signatures.get(sid) != signature:
             for child in list(target_view.children):
                 child.remove()
-            # 有摘要时先插入压缩分隔线和摘要气泡
+            # 有摘要时先插入带元数据的压缩分隔线和摘要气泡
             if session and session.summary:
-                target_view.mount(self._build_compressed_divider())
-                summary_msg = ChatMessage(role="summary", content=f"【历史摘要】\n{session.summary}")
+                target_view.mount(self._build_compressed_divider(session))
+                summary_msg = ChatMessage(
+                    role="summary",
+                    content=f"【历史摘要】\n{session.summary}",
+                )
                 target_view.mount(self._build_message_row(summary_msg))
             for message in messages:
                 target_view.mount(self._build_message_row(message))
@@ -189,7 +297,7 @@ class ChatPanel(Vertical):
 
         self._active_session_id = sid
 
-        # 中断恢复：预填输入框
+        # 中断恢复：若会话有未发送内容且输入框当前为空，则预填
         if session and session.interrupted and session.interrupted_context:
             try:
                 input_widget = self.query_one("#chat_input", Input)

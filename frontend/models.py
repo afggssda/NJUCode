@@ -24,6 +24,10 @@ class ChatSession:
     token_estimate: int = 0
     interrupted: bool = False
     interrupted_context: Optional[str] = None
+    # 累计压缩次数，每次自动或手动压缩后递增
+    compression_count: int = 0
+    # 最近一次压缩前的 token 估算值，用于计算节省量
+    last_compressed_token_count: int = 0
 
 
 @dataclass
