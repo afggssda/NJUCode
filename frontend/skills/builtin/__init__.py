@@ -1,9 +1,10 @@
 """Built-in skills package - Contains all built-in skill implementations.
 
-This module wraps CodeAnalyzer commands into Skills.
+This module wraps CodeAnalyzer commands into Skills, and provides the
+Patch/Rollback execution skills (WBS-4).
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ..models import (
     SkillKind,
@@ -12,6 +13,15 @@ from ..models import (
     SkillOutput,
     SkillPermissionLevel,
 )
+
+# Module-level PatchEngine reference — set by AppState.init_patch_engine()
+_patch_engine: Optional[Any] = None
+
+
+def set_patch_engine(engine: Any) -> None:
+    """Register the PatchEngine instance for use by patch skill executors."""
+    global _patch_engine
+    _patch_engine = engine
 
 
 def execute_builtin_skill(
@@ -38,6 +48,10 @@ def execute_builtin_skill(
         "builtin.deps": execute_deps,
         "builtin.recall": execute_recall,
         "builtin.impact": execute_impact,
+        "builtin.patch.diff": execute_patch_diff,
+        "builtin.patch.apply": execute_patch_apply,
+        "builtin.patch.rollback": execute_patch_rollback,
+        "builtin.patch.history": execute_patch_history,
     }
 
     executor = skill_map.get(skill_id)
@@ -233,6 +247,91 @@ IMPACT_MANIFEST = SkillManifest(
     is_builtin=True,
 )
 
+# ============== Patch/Rollback Skill Manifests (WBS-4) ==============
+
+PATCH_DIFF_MANIFEST = SkillManifest(
+    skill_id="builtin.patch.diff",
+    name="File Diff",
+    version="1.0.0",
+    description="Show unified diff of a file vs its last patch backup",
+    category="modification",
+    parameters=[
+        SkillParameter(
+            name="path",
+            type="path",
+            required=True,
+            description="Relative path to file",
+        ),
+    ],
+    output=SkillOutput(type="diff", description="Unified diff output"),
+    permissions=[SkillPermissionLevel.READ_ONLY],
+    command_aliases=["/diff"],
+    is_builtin=True,
+)
+
+PATCH_APPLY_MANIFEST = SkillManifest(
+    skill_id="builtin.patch.apply",
+    name="Apply Patch",
+    version="1.0.0",
+    description="Apply the most recent pending patch task",
+    category="modification",
+    parameters=[
+        SkillParameter(
+            name="task_id",
+            type="string",
+            required=False,
+            default="",
+            description="Specific task ID to apply (omit for most recent pending)",
+        ),
+    ],
+    output=SkillOutput(type="text", description="Apply result"),
+    permissions=[SkillPermissionLevel.MODIFY_LOCAL],
+    command_aliases=["/patch"],
+    is_builtin=True,
+)
+
+PATCH_ROLLBACK_MANIFEST = SkillManifest(
+    skill_id="builtin.patch.rollback",
+    name="Rollback Patch",
+    version="1.0.0",
+    description="Rollback the last applied patch or a specific task by ID",
+    category="modification",
+    parameters=[
+        SkillParameter(
+            name="task_id",
+            type="string",
+            required=False,
+            default="",
+            description="Task ID to rollback (omit for last applied patch)",
+        ),
+    ],
+    output=SkillOutput(type="text", description="Rollback result"),
+    permissions=[SkillPermissionLevel.MODIFY_LOCAL],
+    command_aliases=["/rollback"],
+    is_builtin=True,
+)
+
+PATCH_HISTORY_MANIFEST = SkillManifest(
+    skill_id="builtin.patch.history",
+    name="Patch History",
+    version="1.0.0",
+    description="Show patch operation history log",
+    category="modification",
+    parameters=[
+        SkillParameter(
+            name="limit",
+            type="integer",
+            required=False,
+            default=10,
+            description="Number of history entries to show",
+        ),
+    ],
+    output=SkillOutput(type="text", description="Formatted patch history table"),
+    permissions=[SkillPermissionLevel.READ_ONLY],
+    command_aliases=["/patchlog"],
+    is_builtin=True,
+)
+
 
 CODEBASE_NAVIGATOR_AGENT = SkillManifest(
     skill_id="agent.codebase-navigator",
@@ -328,6 +427,10 @@ BUILTIN_MANIFESTS = [
     DEPS_MANIFEST,
     RECALL_MANIFEST,
     IMPACT_MANIFEST,
+    PATCH_DIFF_MANIFEST,
+    PATCH_APPLY_MANIFEST,
+    PATCH_ROLLBACK_MANIFEST,
+    PATCH_HISTORY_MANIFEST,
 ]
 
 
@@ -392,3 +495,108 @@ def execute_impact(analyzer: Any, params: Dict[str, Any]) -> Dict[str, Any]:
         params.get("target", ""),
         depth=params.get("depth", 2),
     )
+
+
+# ============== Patch/Rollback Skill Executors (WBS-4) ==============
+
+def execute_patch_diff(analyzer: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Show unified diff of a file vs its last patch backup."""
+    if not _patch_engine:
+        return {"type": "error", "error": "Patch engine not initialized"}
+    file_path = params.get("path", "").strip()
+    if not file_path:
+        return {"type": "error", "error": "Parameter 'path' is required"}
+
+    history = _patch_engine.get_history()
+    for task in history:
+        for op in task.operations:
+            if op.file_path == file_path:
+                diff = op.diff or op.generate_diff()
+                return {
+                    "type": "diff",
+                    "file_path": file_path,
+                    "diff": diff,
+                    "task_id": task.task_id,
+                    "task_status": task.status.value,
+                    "operation_type": op.operation_type,
+                }
+    return {"type": "text", "text": f"No patch history found for: {file_path}"}
+
+
+def execute_patch_apply(analyzer: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply a pending patch task."""
+    if not _patch_engine:
+        return {"type": "error", "error": "Patch engine not initialized"}
+    task_id = params.get("task_id", "").strip()
+
+    if task_id:
+        task = _patch_engine.history_store.get_task(task_id)
+        if not task:
+            return {"type": "error", "error": f"Task not found: {task_id}"}
+    else:
+        pending = _patch_engine.get_pending_tasks()
+        if not pending:
+            return {
+                "type": "text",
+                "text": (
+                    "No pending patch tasks found.\n"
+                    "Use the Patch panel or create a patch via the AI chat."
+                ),
+            }
+        task = pending[0]
+
+    result = _patch_engine.apply_patch(task)
+    if result.success:
+        return {
+            "type": "text",
+            "text": (
+                f"Patch applied successfully.\n"
+                f"Task ID : {result.task_id[:8]}\n"
+                f"Files   : {len(result.files_modified)}\n"
+                + "\n".join(f"  • {f}" for f in result.files_modified)
+            ),
+            "files_modified": result.files_modified,
+        }
+    return {"type": "error", "error": result.error_message}
+
+
+def execute_patch_rollback(analyzer: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Rollback a patch by task_id, or rollback the last applied patch."""
+    if not _patch_engine:
+        return {"type": "error", "error": "Patch engine not initialized"}
+
+    task_id = params.get("task_id", "").strip()
+    if not task_id:
+        last = _patch_engine.history_store.get_last_applied()
+        if not last:
+            return {"type": "text", "text": "No applied patches to rollback."}
+        task_id = last.task_id
+
+    result = _patch_engine.rollback_patch(task_id)
+    if result.success:
+        return {
+            "type": "text",
+            "text": (
+                f"Rollback complete.\n"
+                f"Task ID  : {result.task_id[:8]}\n"
+                f"Restored : {len(result.files_restored)} file(s)\n"
+                + "\n".join(f"  • {f}" for f in result.files_restored)
+            ),
+            "files_restored": result.files_restored,
+        }
+    return {"type": "error", "error": result.error_message}
+
+
+def execute_patch_history(analyzer: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Return formatted patch history table."""
+    if not _patch_engine:
+        return {"type": "error", "error": "Patch engine not initialized"}
+
+    limit = int(params.get("limit", 10))
+    table = _patch_engine.format_history(limit=limit)
+    tasks = _patch_engine.get_history(limit=limit)
+    return {
+        "type": "text",
+        "text": table,
+        "count": len(tasks),
+    }

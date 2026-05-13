@@ -39,6 +39,15 @@ from .ui.widgets.tools_panel import HelloWorldRequested, ToolToggled, ToolsPanel
 from .ui.widgets.tools_panel import AnalysisCommandRequested, SkillExecutionRequested
 from .ui.widgets.skills_panel import SkillsPanel, SkillToggled, AuditLogRequested
 from .ui.widgets.mcp_panel import MCPPanel, MCPServerConnectRequested, MCPToolToggled, MCPServerAddRequested
+from .ui.widgets.patch_panel import (
+    PatchPanel,
+    PatchConfirmRequested,
+    PatchRollbackRequested,
+    PatchCancelRequested,
+    PatchRefreshRequested,
+    _PatchPreviewRequested,
+)
+from .services.code_extractor import extract_code_blocks
 
 
 class NjuCodeApp(App):
@@ -107,6 +116,8 @@ class NjuCodeApp(App):
                     yield SkillsPanel(id="skills_panel")
                 with TabPane("MCP", id="mcp"):
                     yield MCPPanel(id="mcp_panel")
+                with TabPane("Patch", id="patch"):
+                    yield PatchPanel(id="patch_panel")
                 with TabPane("Model", id="model"):
                     yield ConfigPanel(id="config_panel")
             yield VerticalSplitter(splitter_id="right", id="splitter_right")
@@ -141,6 +152,9 @@ class NjuCodeApp(App):
         # Initialize MCP system
         self.state.init_mcp()
 
+        # Initialize Patch/Rollback engine (WBS-4)
+        self.state.init_patch_engine()
+
         self.refresh_ui()
         self._apply_pane_widths()
         self._update_status_bar()
@@ -152,6 +166,8 @@ class NjuCodeApp(App):
             )
         ):
             self._async_init_mcp_servers()
+        # Populate patch panel with initial state
+        self._refresh_patch_panel()
 
     def _detect_git_branch(self) -> str:
         """尝试读取当前工作区 git 分支名。"""
@@ -445,6 +461,85 @@ class NjuCodeApp(App):
         if suffix_matches:
             return sorted(set(suffix_matches), key=len)[0]
         return None
+
+    def _extract_filename_from_prose(self, text: str, workspace_files: list[Path]) -> str | None:
+        """Scan prose text for a filename mention and resolve it to a workspace path.
+
+        Looks for patterns like `demo/1.py`, **demo/1.py**, or bare tokens that
+        look like paths, returning the first one that resolves to a real file.
+        Checks path-like tokens first (contain / or backslash) before bare filenames so
+        that demo/1.py beats a same-named file in a different directory.
+        """
+        # Extract tokens that look like paths (contain a separator or have an extension)
+        # Use the last occurrence of each token — the one closest to the code block
+        path_tokens = re.findall(r"[`*\"']?([\w./\\-]+\.[A-Za-z0-9]{1,8})[`*\"']?", text)
+        # Deduplicate preserving last occurrence order, then prioritise tokens with a
+        # directory separator (unambiguous) before bare filenames
+        seen_tokens: set[str] = set()
+        unique_last: list[str] = []
+        for t in reversed(path_tokens):
+            if t not in seen_tokens:
+                seen_tokens.add(t)
+                unique_last.append(t)
+        ordered = sorted(unique_last, key=lambda t: (0 if ("/" in t or "\\" in t) else 1))
+        for token in ordered:
+            resolved = self._resolve_file_reference(token, workspace_files)
+            if resolved:
+                return resolved
+        return None
+
+    def _extract_new_file_from_prose(self, text: str) -> str | None:
+        """Extract a new file path from prose when the file doesn't exist yet.
+
+        Looks for patterns like "创建 `path/to/file.py`" or "新建文件 path/to/file.py"
+        that indicate the LLM is suggesting a new file.
+        """
+        path_tokens = re.findall(r"[`*\"']?([\w./\\-]+\.[A-Za-z0-9]{1,8})[`*\"']?", text)
+        for token in reversed(path_tokens):
+            normalized = token.replace("\\", "/").lstrip("./")
+            if "/" in normalized and not normalized.startswith(".."):
+                return normalized
+        return None
+
+    _NON_PATCHABLE_LANGS = frozenset({
+        "bash", "shell", "sh", "zsh", "console", "terminal",
+        "text", "plaintext", "output", "log", "diff",
+    })
+
+    _SHELL_CMD_RE = re.compile(
+        r"^\s*(?:\$|#|>|>>>)\s"
+        r"|^\s*(?:pip|npm|yarn|pnpm|cargo|go|git|cd|ls|cat|mkdir|rm|cp|mv|curl|wget|docker|brew|apt|sudo|echo|export)\s",
+    )
+
+    _OUTPUT_HINT_RE = re.compile(
+        r"(?:输出|运行结果|执行结果|期望输出|预期输出|结果如下|结果为|打印|显示"
+        r"|output|expected output|result|prints?|produces?|returns?|shows?)"
+        r"\s*[:：]?\s*$",
+        re.IGNORECASE,
+    )
+
+    def _is_patchable_block(self, block) -> bool:
+        """Return False for blocks that are clearly not file content (commands, output, etc.)."""
+        lang = (block.language or "").lower()
+        if lang in self._NON_PATCHABLE_LANGS:
+            return False
+        code = block.code.strip()
+        if not code:
+            return False
+        lines = code.splitlines()
+        if len(lines) <= 2 and self._SHELL_CMD_RE.match(lines[0]):
+            return False
+        return True
+
+    def _is_output_block(self, preceding_text: str, block) -> bool:
+        """Return True if the block appears to be example output rather than code to apply."""
+        lang = (block.language or "").lower()
+        if lang in ("output", "text", "plaintext", "log", "console"):
+            return True
+        last_line = preceding_text.rstrip().rsplit("\n", 1)[-1] if preceding_text.strip() else ""
+        if self._OUTPUT_HINT_RE.search(last_line):
+            return True
+        return False
 
     def _extract_file_candidates(self, content: str, workspace_files: list[Path]) -> list[str]:
         candidates: list[str] = []
@@ -753,6 +848,143 @@ class NjuCodeApp(App):
         except ValueError as exc:
             self.notify(f"导入失败: {exc}", severity="error")
 
+    # ------------------------------------------------------------------
+    # Patch/Rollback event handlers (WBS-4)
+    # ------------------------------------------------------------------
+
+    def _refresh_patch_panel(self) -> None:
+        """Push current patch state into PatchPanel."""
+        try:
+            panel = self.query_one("#patch_panel", PatchPanel)
+        except Exception:
+            return
+
+        pending = self.state.get_pending_patches()
+        pending_items = [
+            {
+                "task_id": t.task_id,
+                "summary": t.summary_line,
+                "description": t.description,
+                "files_count": len(t.operations),
+                # single-operation tasks: expose op type so panel can split lists
+                "operation_type": t.operations[0].operation_type if len(t.operations) == 1 else "modify",
+            }
+            for t in pending
+        ]
+        panel.load_pending(pending_items)
+
+        history = self.state.get_patch_history(limit=20)
+        history_items = [
+            {
+                "task_id": t.task_id,
+                "summary": t.summary_line,
+                "reversible": t.is_reversible,
+                "diff": "\n".join(op.diff for op in t.operations if op.diff),
+            }
+            for t in history
+            if t not in pending
+        ]
+        panel.load_history(history_items)
+
+        # Auto-show diff only when no task is selected yet; preserve selection on refresh
+        if pending and not panel._selected_task_id:
+            diff_text = self.state.preview_patch(pending[0].task_id)
+            panel.show_diff(diff_text)
+
+    def on_patch_refresh_requested(self, _: PatchRefreshRequested) -> None:
+        """Reload patch panel data from state."""
+        self._refresh_patch_panel()
+
+    def on_patch_confirm_requested(self, message: PatchConfirmRequested) -> None:
+        """User confirmed a patch — apply it and refresh."""
+        result = self.state.apply_patch(message.task_id)
+        if result is None:
+            self.notify("Patch engine not initialized.", severity="error")
+            return
+        if result.success:
+            files = ", ".join(result.files_modified[:3])
+            extra = f" (+{len(result.files_modified) - 3} more)" if len(result.files_modified) > 3 else ""
+            self.notify(f"Patch applied: {files}{extra}")
+            self.state.save()
+        else:
+            self.notify(f"Patch failed: {result.error_message}", severity="error")
+        self._refresh_patch_panel()
+
+    def on__patch_preview_requested(self, message: _PatchPreviewRequested) -> None:
+        """User selected a pending task — show its diff without touching state."""
+        diff_text = self.state.preview_patch(message.task_id)
+        try:
+            panel = self.query_one("#patch_panel", PatchPanel)
+            panel.show_diff(diff_text or "(no diff available)")
+        except Exception:
+            pass
+
+    def on_patch_rollback_requested(self, message: PatchRollbackRequested) -> None:
+        """User requested rollback — restore files from backup.
+
+        If the rollback involves deleting files (undoing a 'create' operation),
+        require explicit user confirmation before proceeding.
+        """
+        if not self.state._patch_history_store:
+            self.notify("Patch engine not initialized.", severity="error")
+            return
+
+        task = self.state._patch_history_store.get_task(message.task_id)
+        if not task:
+            self.notify("Patch task not found.", severity="error")
+            return
+
+        # Check if rollback will delete files (undo create operations)
+        create_ops = [op for op in task.operations if op.operation_type == "create"]
+        if create_ops and not message.confirmed:
+            files_to_delete = ", ".join(op.file_path for op in create_ops[:5])
+            extra = f" (+{len(create_ops) - 5} more)" if len(create_ops) > 5 else ""
+            self.notify(
+                f"Rollback will DELETE: {files_to_delete}{extra}. Click Rollback again to confirm.",
+                severity="warning",
+            )
+            try:
+                panel = self.query_one("#patch_panel", PatchPanel)
+                panel.set_status(
+                    f"Confirm: rollback will delete {len(create_ops)} file(s). Click Rollback again.",
+                    error=True,
+                )
+                panel._pending_rollback_confirm = message.task_id
+                panel._set_rollback_button(True)
+            except Exception:
+                pass
+            return
+
+        # Clear the confirmation message before executing
+        try:
+            panel = self.query_one("#patch_panel", PatchPanel)
+            panel.set_status("")
+            panel._pending_rollback_confirm = None
+        except Exception:
+            pass
+
+        result = self.state.rollback_patch(message.task_id)
+        if result is None:
+            self.notify("Patch engine not initialized.", severity="error")
+            return
+        if result.success:
+            files = ", ".join(result.files_restored[:3])
+            extra = f" (+{len(result.files_restored) - 3} more)" if len(result.files_restored) > 3 else ""
+            self.notify(f"Rollback complete: {files}{extra}")
+            self.state.save()
+        else:
+            self.notify(f"Rollback failed: {result.error_message}", severity="error")
+        self._refresh_patch_panel()
+
+    def on_patch_cancel_requested(self, message: PatchCancelRequested) -> None:
+        """User cancelled a pending patch task."""
+        ok, reason = self.state.cancel_patch(message.task_id)
+        if ok:
+            self.notify("Patch cancelled.")
+        else:
+            self.notify(f"Cannot cancel: {reason}", severity="warning")
+        self._refresh_patch_panel()
+
     def on_message_submitted(self, message: MessageSubmitted) -> None:
         """处理用户发送消息并启动模型流式回复。
 
@@ -1031,7 +1263,211 @@ class NjuCodeApp(App):
         did_compress = self.state.auto_compress_if_needed(self.compressor)
         if did_compress:
             self.notify("上下文过长，已自动压缩历史消息。")
+
+        # Extract code blocks from the completed assistant reply and queue as patches
+        if target_session and target_session.messages and not cancelled and not error_message:
+            last_msg = target_session.messages[-1]
+            if last_msg.role == "assistant" and last_msg.content.strip():
+                self._extract_and_queue_patches(last_msg.content, session_id)
+
         self.state.save()
+
+    _LANG_TO_EXT: dict[str, str] = {
+        "python": ".py", "javascript": ".js", "typescript": ".ts",
+        "jsx": ".jsx", "tsx": ".tsx", "json": ".json",
+        "yaml": ".yaml", "yml": ".yaml", "bash": ".sh", "shell": ".sh",
+        "html": ".html", "css": ".css", "sql": ".sql", "go": ".go",
+        "rust": ".rs", "java": ".java", "cpp": ".cpp", "c": ".c",
+        "toml": ".toml",
+    }
+
+    def _extract_and_queue_patches(self, response_text: str, session_id: str) -> None:
+        """Parse code blocks from an LLM reply and create pending PatchTasks.
+
+        Blocks with a filename hint are matched directly.  Blocks without a
+        filename hint are matched against files recently mentioned in the
+        conversation, filtered by language/extension.
+        """
+        blocks = extract_code_blocks(response_text)
+        if not blocks:
+            return
+
+        # Build ordered list of context files from recent messages (newest last = highest priority)
+        target_session = next((s for s in self.state.sessions if s.session_id == session_id), None)
+        context_files: list[str] = []
+        workspace_files = self._workspace_files()
+        if target_session:
+            for msg in target_session.messages[-8:]:
+                for c in self._extract_file_candidates(msg.content, workspace_files):
+                    if c not in context_files:
+                        context_files.append(c)
+
+        file_changes: dict[str, tuple[str, str]] = {}
+        skipped = 0
+
+        for block in blocks:
+            preceding = response_text[max(0, block.start_pos - 300):block.start_pos]
+
+            # Skip blocks that are example output, not code modifications
+            if self._is_output_block(preceding, block):
+                skipped += 1
+                continue
+
+            resolved: str | None = None
+
+            if block.filename:
+                resolved = self._resolve_file_reference(block.filename, workspace_files)
+                # If the file doesn't exist yet, treat the hint as a new file path
+                if not resolved:
+                    normalized = block.filename.strip().strip("\"'`").replace("\\", "/").lstrip("./")
+                    if normalized and ("/" in normalized or "." in normalized):
+                        resolved = normalized
+
+            # Scan the text immediately before this block for a filename mention
+            # (LLMs typically write "修改 `demo/1.py`:" before the code fence)
+            if not resolved:
+                resolved = self._extract_filename_from_prose(preceding, workspace_files)
+
+            # Also check prose for new file creation hints (file doesn't exist yet)
+            if not resolved:
+                resolved = self._extract_new_file_from_prose(preceding)
+
+            if not resolved and context_files:
+                if self._is_patchable_block(block):
+                    lang = (block.language or "").lower()
+                    ext = self._LANG_TO_EXT.get(lang, "")
+                    if ext:
+                        # Prefer most recently mentioned file with matching extension
+                        matches = [f for f in reversed(context_files) if f.endswith(ext)]
+                        resolved = matches[0] if matches else None
+                    if not resolved and len(context_files) == 1:
+                        # Only one file in context — safe to assume it's the target
+                        resolved = context_files[0]
+
+            if not resolved:
+                skipped += 1
+                continue
+
+            abs_path = self.state.workspace_root / resolved
+            try:
+                old_content = abs_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                old_content = ""
+
+            new_content = block.code
+            if old_content == new_content:
+                continue
+
+            # Last block for a given file wins
+            file_changes[resolved] = (old_content, new_content)
+
+        if file_changes:
+            created_files: list[str] = []
+            for file_path, (old_content, new_content) in file_changes.items():
+                task = self.state.create_patch(
+                    file_changes={file_path: (old_content, new_content)},
+                    description=f"AI suggestion for {file_path}",
+                    is_ai_generated=True,
+                )
+                if task:
+                    created_files.append(file_path)
+            if created_files:
+                files_str = ", ".join(created_files[:3])
+                extra = f" (+{len(created_files) - 3} more)" if len(created_files) > 3 else ""
+                self.notify(f"AI patch queued: {files_str}{extra} — review in Patch tab")
+                self._refresh_patch_panel()
+                self.query_one("#center_tabs", TabbedContent).active = "patch"
+
+        if skipped and not file_changes:
+            self.notify(
+                f"{skipped} code block(s) skipped — add a filename hint to the code fence header (e.g. ```python frontend/app.py)",
+                severity="information",
+            )
+
+    def _apply_last_reply_to_file(self, target_file: str) -> None:
+        """Create a PatchTask from the last assistant message's code blocks.
+
+        Called by the /patch <file> command.  Finds the most recent assistant
+        message, extracts all code blocks (regardless of filename hint), merges
+        their code, and queues a patch against *target_file*.
+        """
+        resolved = self._resolve_file_reference(target_file)
+        if not resolved:
+            self.state.append_message(
+                "assistant",
+                f"[系统提示] 找不到文件: {target_file}",
+            )
+            self.state.save()
+            self.query_one("#chat_panel", ChatPanel).render_messages(
+                self.state.active_session.messages, self.state.active_session_id
+            )
+            return
+
+        # Find the last assistant message
+        last_assistant_content = ""
+        for msg in reversed(self.state.active_session.messages):
+            if msg.role == "assistant" and msg.content.strip():
+                last_assistant_content = msg.content
+                break
+
+        if not last_assistant_content:
+            self.state.append_message("assistant", "[系统提示] 没有找到上一条 AI 回复。")
+            self.state.save()
+            self.query_one("#chat_panel", ChatPanel).render_messages(
+                self.state.active_session.messages, self.state.active_session_id
+            )
+            return
+
+        blocks = extract_code_blocks(last_assistant_content)
+        if not blocks:
+            self.state.append_message("assistant", "[系统提示] 上一条 AI 回复中没有找到代码块。")
+            self.state.save()
+            self.query_one("#chat_panel", ChatPanel).render_messages(
+                self.state.active_session.messages, self.state.active_session_id
+            )
+            return
+
+        # Use the first code block that has content; if multiple, pick the
+        # largest one (most likely to be the full file replacement).
+        best_block = max(blocks, key=lambda b: len(b.code))
+        new_content = best_block.code
+
+        abs_path = self.state.workspace_root / resolved
+        try:
+            old_content = abs_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            old_content = ""
+
+        if old_content == new_content:
+            self.state.append_message(
+                "assistant",
+                f"[系统提示] 代码与 {resolved} 当前内容完全相同，无需创建补丁。",
+            )
+            self.state.save()
+            self.query_one("#chat_panel", ChatPanel).render_messages(
+                self.state.active_session.messages, self.state.active_session_id
+            )
+            return
+
+        task = self.state.create_patch(
+            file_changes={resolved: (old_content, new_content)},
+            description=f"AI suggestion for {resolved}",
+            is_ai_generated=True,
+        )
+        if task:
+            self.state.append_message(
+                "assistant",
+                f"[系统提示] 已为 {resolved} 创建补丁，请在 Patch 标签页中确认应用。",
+            )
+            self._refresh_patch_panel()
+            self.query_one("#center_tabs", TabbedContent).active = "patch"
+        else:
+            self.state.append_message("assistant", "[系统提示] 创建补丁失败，Patch 引擎未初始化。")
+
+        self.state.save()
+        self.query_one("#chat_panel", ChatPanel).render_messages(
+            self.state.active_session.messages, self.state.active_session_id
+        )
 
     @work(thread=True, exclusive=True)
     def _stream_assistant_reply(self, request: OpenAIRequest, session_id: str, cancel_event: Event) -> None:
@@ -1099,6 +1535,22 @@ class NjuCodeApp(App):
             self.query_one("#chat_panel", ChatPanel).render_messages(
                 self.state.active_session.messages, self.state.active_session_id
             )
+            return
+
+        # /patch <file> — apply last AI reply's code blocks to the given file
+        if command.startswith("/patch "):
+            target = command[len("/patch "):].strip()
+            if target:
+                self._apply_last_reply_to_file(target)
+            else:
+                self.state.append_message(
+                    "assistant",
+                    "[系统提示] 用法: /patch <文件路径>  例如: /patch frontend/app.py",
+                )
+                self.state.save()
+                self.query_one("#chat_panel", ChatPanel).render_messages(
+                    self.state.active_session.messages, self.state.active_session_id
+                )
             return
 
         # Execute via skills system

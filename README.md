@@ -5,12 +5,6 @@
 ## 使用前请自行替换API key https://www.modelscope.cn/my/access/token
 ### 替换.env文件的OPENAI_API_KEY即可
 
-## 当前进度
-- 已完成：WBS-1（项目初始化）、WBS-2（CLI 与会话系统）
-- 基本完成：WBS-3（上下文分析与检索，含检索工作台）
-- 说明：`Session 管理增强`已补强到“多会话 + 文件安全删除/撤销 + 基础交互修复”，`上下文压缩`仍未完成
-- 下一重点：WBS-4（基于 Patch 的工程修改能力）
-
 ## 项目结构
 ```text
 NJUCode/
@@ -129,7 +123,7 @@ python main.py
 ### WBS-4 Patch 工程修改能力
 - 建立统一 patch 任务模型（约束输入，输出可审阅 diff）
 - 建立安全流程：检索 -> 影响面分析 -> patch 方案
-- 支持 dry-run 与回滚
+- 支持回滚
 
 ### WBS-5 Skills 体系
 - 将检索/分析/补丁/测试拆分为可编排技能
@@ -144,5 +138,4 @@ python main.py
 - 为关键 UI 交互补齐回归检查
 
 ## 变更记录
-- 2026-03-31 详细改动见：`改动/3.31_jingyu_change.md`
-- 2026-04-16 详细改动见：`改动/4.16_jingyu_change.md`
+详细改动见改动目录

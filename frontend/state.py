@@ -22,6 +22,12 @@ from .skills.builtin import BUILTIN_AGENT_MANIFESTS, BUILTIN_MANIFESTS
 from .mcp.manager import MCPManager
 from .mcp.executor import MCPToolExecutor
 from .mcp.models import MCPToolToggle
+from .services.patch_engine import (
+    PatchEngine,
+    PatchExecutionResult,
+    PatchHistoryStore,
+    PatchTask,
+)
 
 
 class AppState:
@@ -67,6 +73,10 @@ class AppState:
         self.mcp_manager: Optional[MCPManager] = None
         self._mcp_executor: Optional[MCPToolExecutor] = None
         self.mcp_tools: Dict[str, MCPToolToggle] = {}
+
+        # Patch/Rollback system (WBS-4)
+        self._patch_engine: Optional[PatchEngine] = None
+        self._patch_history_store: Optional[PatchHistoryStore] = None
 
     def load(self) -> None:
         """从磁盘加载已保存的设置并恢复到内存。
@@ -522,6 +532,114 @@ class AppState:
         """
         if self.mcp_manager:
             self.mcp_manager.update_tool_status(skill_id, enabled)
+
+    def init_patch_engine(self) -> None:
+        """Initialize the Patch/Rollback engine and register it with builtin skills."""
+        self._patch_history_store = PatchHistoryStore(self.workspace_root)
+        self._patch_history_store.load()
+
+        self._patch_engine = PatchEngine(
+            workspace_root=self.workspace_root,
+            history_store=self._patch_history_store,
+            audit_logger=self._audit_logger,
+        )
+
+        # Register engine reference so builtin patch skill executors can use it
+        from .skills.builtin import set_patch_engine
+        set_patch_engine(self._patch_engine)
+
+    def create_patch(
+        self,
+        file_changes: Dict[str, tuple],
+        description: str = "",
+        is_ai_generated: bool = False,
+        reviewer: Optional[str] = None,
+    ) -> Optional[PatchTask]:
+        """Create a new PatchTask from file changes.
+
+        Args:
+            file_changes: {relative_path: (old_content, new_content)}
+            description: Human-readable description of the change
+            is_ai_generated: True if the change was produced by the LLM
+            reviewer: Name of the human reviewer (for FR-10)
+
+        Returns:
+            PatchTask on success, None if engine not initialized.
+        """
+        if not self._patch_engine:
+            return None
+        return self._patch_engine.generate_patch(
+            file_changes=file_changes,
+            description=description,
+            session_id=self.active_session_id,
+            is_ai_generated=is_ai_generated,
+            reviewer=reviewer,
+        )
+
+    def preview_patch(self, task_id: str) -> str:
+        """Return formatted diff preview for a patch task."""
+        if not self._patch_engine:
+            return "Patch engine not initialized."
+        task = self._patch_history_store.get_task(task_id) if self._patch_history_store else None
+        if not task:
+            return f"Task not found: {task_id}"
+        return self._patch_engine.preview_patch(task)
+
+    def confirm_patch(self, task_id: str) -> tuple:
+        """Mark a patch task as confirmed (ready to apply)."""
+        if not self._patch_engine:
+            return False, "Patch engine not initialized."
+        return self._patch_engine.confirm_patch(task_id)
+
+    def apply_patch(
+        self,
+        task_id: str,
+    ) -> Optional[PatchExecutionResult]:
+        """Apply a confirmed patch task.
+
+        Args:
+            task_id: ID of the PatchTask to apply
+
+        Returns:
+            PatchExecutionResult, or None if engine/task not found.
+        """
+        if not self._patch_engine or not self._patch_history_store:
+            return None
+        task = self._patch_history_store.get_task(task_id)
+        if not task:
+            return None
+        return self._patch_engine.apply_patch(task)
+
+    def rollback_patch(self, task_id: str) -> Optional[PatchExecutionResult]:
+        """Rollback an applied patch task.
+
+        Args:
+            task_id: ID of the PatchTask to rollback
+
+        Returns:
+            PatchExecutionResult, or None if engine not initialized.
+        """
+        if not self._patch_engine:
+            return None
+        return self._patch_engine.rollback_patch(task_id)
+
+    def cancel_patch(self, task_id: str) -> tuple:
+        """Cancel a pending patch task."""
+        if not self._patch_engine:
+            return False, "Patch engine not initialized."
+        return self._patch_engine.cancel_patch(task_id)
+
+    def get_pending_patches(self) -> List[PatchTask]:
+        """Return all pending/previewed/confirmed patch tasks."""
+        if not self._patch_engine:
+            return []
+        return self._patch_engine.get_pending_tasks()
+
+    def get_patch_history(self, limit: int = 20) -> List[PatchTask]:
+        """Return patch history, newest first."""
+        if not self._patch_engine:
+            return []
+        return self._patch_engine.get_history(limit=limit)
 
 
     def get_token_estimate(self, session_id: str) -> int:
