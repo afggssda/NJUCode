@@ -28,6 +28,7 @@ NJUCode/
 │   │   ├── __init__.py
 │   │   ├── openai_client.py
 │   │   ├── code_analysis.py
+│   │   ├── project_testing.py
 │   │   ├── settings_store.py
 │   │   └── runtime_tools.py
 │   └── ui/
@@ -42,6 +43,7 @@ NJUCode/
 │           ├── splitter.py
 │           └── tools_panel.py
 ├── .nju_code/settings.json
+├── test_all_features.py
 ├── 需求文档.md
 └── 项目管理计划.md
 ```
@@ -81,9 +83,15 @@ NJUCode/
 - 同名符号命中时支持自动排序，仅优先保留最相关的 1~2 个结果
 
 ### 5) 检索工作台（Tools 面板）
-- 按钮：`Help`、`Scan`、`Search`、`Symbol`、`Summary`、`Deps`、`Recall`、`Impact`
+- 按钮：`Help`、`Scan`、`Search`、`Symbol`、`Summary`、`Deps`、`Recall`、`Impact`、`Tasks`、`Metrics`、`Doctor`
 - 参数输入：`query`、`path`、`depth`、`top_k`
 - 与聊天中的斜杠命令共用同一执行链路
+
+### 6) Project Doctor 与综合测试
+- 新增 Project Doctor 服务：检查项目结构、依赖声明、Python 语法、入口导入、分析引擎、代码块提取、上下文压缩、Settings、Patch、Skills、MCP、UI 结构、README 命令一致性和基础安全项
+- 新增斜杠命令：`/doctor` 
+- Tools 面板新增 `Doctor` 按钮，可直接触发项目自检
+- 新增 `test_all_features.py`，使用标准库 `unittest` 对核心功能和整项工程进行综合回归测试
 
 ## 运行方式
 
@@ -109,6 +117,38 @@ python main.py
 /deps <relative_path> [--depth 1|2]
 /recall <requirement text> [--top 5..30]
 /impact <symbol_or_relative_path> [--depth 1|2]
+/tasks [--tag TODO|FIXME|BUG|HACK|NOTE|CHECKBOX] [--owner name] [--done] [--include-tests] [--top 50]
+/metrics [--top 10] [--path text] [--include-tests]
+/doctor [--verbose]
+```
+
+`/tasks` 用于扫描项目中的 `TODO`、`FIXME`、`BUG`、`HACK`、`NOTE` 标记以及 Markdown 清单项；Tools 面板也提供 `Tasks` 按钮，可用 `query` 输入框传入标签过滤。
+
+`/metrics` 用于执行静态代码指标分析，输出 Python 文件复杂度、依赖 fan-in/fan-out、import 环和维护热点排序，可用于判断优先重构位置。
+
+### 运行综合测试
+```bash
+python test_all_features.py
+```
+
+运行结束后会自动生成 Markdown 和 JSON 测试报告：
+
+```text
+.nju_code/reports/test_all_features_*.md
+.nju_code/reports/test_all_features_*.json
+```
+
+也可以在应用聊天框或 Tools 面板中运行：
+```text
+/doctor
+/doctor --verbose
+```
+
+`/doctor` 运行结束后也会自动保存 Markdown 和 JSON 报告：
+
+```text
+.nju_code/reports/project_doctor_*.md
+.nju_code/reports/project_doctor_*.json
 ```
 
 ## 后续计划

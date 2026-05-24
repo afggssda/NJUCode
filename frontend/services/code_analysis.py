@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+import shlex
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -624,17 +626,101 @@ class CodeAnalyzer:
                 f"建议阅读顺序: {payload.get('suggested_read_order', [])}"
             )
 
+        if ptype == "task_index":
+            summary = payload.get("summary", {})
+            filters = payload.get("filters", {})
+            lines = [
+                "[Task Index]",
+                (
+                    f"open={summary.get('open', 0)} done={summary.get('done', 0)} "
+                    f"total={summary.get('total', 0)} showing={len(payload.get('items', []))}/"
+                    f"{payload.get('total_before_limit', 0)} scanned_files={summary.get('scanned_files', 0)}"
+                ),
+                (
+                    f"filters: tag={filters.get('tag') or '*'} "
+                    f"owner={filters.get('owner') or '*'} include_done={filters.get('include_done')} "
+                    f"include_tests={filters.get('include_tests')} path={filters.get('path') or '*'} "
+                    f"top={filters.get('limit')}"
+                ),
+            ]
+            for item in payload.get("items", [])[:50]:
+                owner = f" @{item.get('owner')}" if item.get("owner") else ""
+                lines.append(
+                    f"- [{item.get('priority')}] {item.get('tag')}{owner} "
+                    f"{item.get('path')}:{item.get('line')} {item.get('text')}"
+                )
+            hidden = payload.get("total_before_limit", 0) - len(payload.get("items", []))
+            if hidden > 0:
+                lines.append(f"- ... {hidden} more task(s); raise --top to show more")
+            return "\n".join(lines)
+
+        if ptype == "code_metrics":
+            summary = payload.get("summary", {})
+            filters = payload.get("filters", {})
+            lines = [
+                "[Code Metrics]",
+                (
+                    f"files={summary.get('python_files', 0)} code_lines={summary.get('total_code_lines', 0)} "
+                    f"functions={summary.get('functions', 0)} cycles={summary.get('cycles', 0)}"
+                ),
+                (
+                    f"complex={summary.get('complex_functions', 0)} "
+                    f"very_complex={summary.get('very_complex_functions', 0)} "
+                    f"include_tests={filters.get('include_tests')} path={filters.get('path') or '*'} "
+                    f"top={filters.get('top_n')}"
+                ),
+                "",
+                "Hotspots:",
+            ]
+            for item in payload.get("hotspots", [])[:10]:
+                cycle = f" cycle={item.get('cycle_id')}" if item.get("cycle_id") else ""
+                lines.append(
+                    f"- score={item.get('hotspot_score')} {item.get('path')} "
+                    f"complexity={item.get('total_complexity')} max={item.get('max_complexity')} "
+                    f"fan_in={item.get('fan_in')} fan_out={item.get('fan_out')}{cycle}"
+                )
+            lines.append("")
+            lines.append("Most Complex Functions:")
+            for item in payload.get("complex_functions", [])[:10]:
+                lines.append(
+                    f"- c={item.get('complexity')} {item.get('qualname')} "
+                    f"@ {item.get('path')}:{item.get('line')}"
+                )
+            cycles = payload.get("cycles", [])
+            if cycles:
+                lines.append("")
+                lines.append("Import Cycles:")
+                for cycle in cycles[:5]:
+                    lines.append(f"- #{cycle.get('id')} size={cycle.get('size')} {cycle.get('files')}")
+            return "\n".join(lines)
+
+        if ptype == "project_test_report":
+            return str(payload.get("text") or self.to_json(payload))
+
         return self.to_json(payload)
 
     def run_command(self, raw_command: str) -> dict[str, Any]:
         cmd = raw_command.strip()
         if not cmd:
             return {"type": "error", "error": "empty_command"}
+        try:
+            tokens = shlex.split(cmd)
+        except ValueError:
+            tokens = cmd.split()
+
+        def option_value(name: str, default: str = "") -> str:
+            if name not in tokens:
+                return default
+            index = tokens.index(name)
+            if index + 1 >= len(tokens):
+                return default
+            return tokens[index + 1]
 
         if cmd in {"/help", "/analysis help"}:
             return {
                 "type": "help",
                 "commands": [
+                    "/help",
                     "/scan",
                     "/search <keyword> [--regex] [--case]",
                     "/symbol <name>",
@@ -642,6 +728,9 @@ class CodeAnalyzer:
                     "/deps <relative_path> [--depth 1|2]",
                     "/recall <requirement text> [--top 5..30]",
                     "/impact <symbol_or_relative_path> [--depth 1|2]",
+                    "/tasks [--tag TODO|FIXME|BUG|HACK|NOTE|CHECKBOX] [--owner name] [--path text] [--done] [--include-tests] [--top 50]",
+                    "/metrics [--top 10] [--path text] [--include-tests]",
+                    "/doctor [--verbose]",
                     "/mcp <mcp.server.tool> [json-params]",
                 ],
             }
@@ -690,5 +779,56 @@ class CodeAnalyzer:
                 depth = int(m.group(1))
                 body = re.sub(r"--depth\s+\d+", "", body).strip()
             return self.impact_analysis(body, depth=depth)
+
+        if cmd.startswith("/tasks"):
+            from .task_index import ProjectTaskIndex
+
+            tag = option_value("--tag")
+            owner = option_value("--owner")
+            path_filter = option_value("--path")
+            limit = 50
+            limit_raw = option_value("--top", option_value("--limit", "50"))
+            if limit_raw.isdigit():
+                limit = int(limit_raw)
+            include_done = "--done" in cmd or "--all" in cmd or "--include-done" in cmd
+            include_tests = "--include-tests" in cmd
+            return ProjectTaskIndex(self.workspace_root).scan(
+                tag=tag,
+                owner=owner,
+                include_done=include_done,
+                include_tests=include_tests,
+                path_filter=path_filter,
+                limit=limit,
+            )
+
+        if cmd.startswith("/metrics"):
+            from .code_metrics import ProjectMetricsAnalyzer
+
+            top_n = 10
+            top_match = re.search(r"--(?:top|limit)\s+(\d+)", cmd)
+            if top_match:
+                top_n = int(top_match.group(1))
+            path_filter = ""
+            path_match = re.search(r"--path\s+([^\s]+)", cmd)
+            if path_match:
+                path_filter = path_match.group(1).strip()
+            include_tests = "--include-tests" in cmd
+            return ProjectMetricsAnalyzer(self.workspace_root).analyze(
+                top_n=top_n,
+                include_tests=include_tests,
+                path_filter=path_filter,
+            )
+
+        if cmd.startswith("/doctor"):
+            from .project_testing import run_doctor_as_payload
+
+            verbose = "--verbose" in cmd
+            include_slow = "--slow" in cmd or "--include-slow" in cmd
+            return run_doctor_as_payload(
+                self.workspace_root,
+                include_slow=include_slow,
+                verbose=verbose,
+                save_report=os.environ.get("NJU_CODE_DISABLE_DOCTOR_REPORT") != "1",
+            )
 
         return {"type": "error", "error": "unknown_command", "command": cmd}

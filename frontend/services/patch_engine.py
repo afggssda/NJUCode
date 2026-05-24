@@ -274,7 +274,20 @@ class PatchHistoryStore:
             tmp_path = self.history_path.with_suffix(".tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            tmp_path.replace(self.history_path)
+            try:
+                tmp_path.replace(self.history_path)
+            except OSError:
+                # Some restricted Windows shells deny atomic replace even when
+                # normal writes are allowed. Fall back to a direct write so the
+                # patch history remains usable in sandboxed course setups.
+                self.history_path.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
         except Exception as e:
             print(f"[PatchHistoryStore] Failed to save: {e}")
 

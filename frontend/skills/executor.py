@@ -310,11 +310,17 @@ class SkillExecutor:
 
         # First part is command, rest are args
         args = parts[1:]
+        param_names = {param.name for param in manifest.parameters}
         aliases = {
             "case": "case_sensitive",
             "regex": "use_regex",
-            "top": "top_k",
         }
+        if "top_k" in param_names:
+            aliases["top"] = "top_k"
+        elif "top_n" in param_names:
+            aliases["top"] = "top_n"
+        elif "limit" in param_names:
+            aliases["top"] = "limit"
 
         required_params = [p for p in manifest.parameters if p.required]
         positional_values: list[str] = []

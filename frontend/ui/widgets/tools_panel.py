@@ -56,7 +56,10 @@ class ToolsPanel(Vertical):
         yield Input(placeholder="检索关键字/需求描述/符号名", id="analysis_query_input")
         yield Input(placeholder="文件相对路径 (e.g. frontend/app.py)", id="analysis_path_input")
         with Horizontal():
+            yield Label("Depth", classes="tool-label")
             yield Input(placeholder="depth (1-2)", id="analysis_depth_input", value="2")
+        with Horizontal():
+            yield Label("Top K", classes="tool-label")
             yield Input(placeholder="top_k", id="analysis_top_input", value="10")
         with Horizontal():
             yield Button("Help", id="analysis_help_btn")
@@ -68,6 +71,10 @@ class ToolsPanel(Vertical):
             yield Button("Deps", id="analysis_deps_btn")
             yield Button("Recall", id="analysis_recall_btn")
             yield Button("Impact", id="analysis_impact_btn", variant="warning")
+        with Horizontal():
+            yield Button("Tasks", id="analysis_tasks_btn", variant="success")
+            yield Button("Metrics", id="analysis_metrics_btn", variant="warning")
+            yield Button("Doctor", id="analysis_doctor_btn", variant="error")
 
     def refresh_tools(self, tools: list[ToolToggle]) -> None:
         """根据工具列表创建或更新开关组件。
@@ -132,6 +139,22 @@ class ToolsPanel(Vertical):
         if button_id == "analysis_impact_btn":
             target = query or path
             return f"/impact {target} --depth {depth}" if target else None
+        if button_id == "analysis_tasks_btn":
+            parts = ["/tasks"]
+            if query:
+                parts.extend(["--tag", query])
+            if path:
+                parts.extend(["--path", path])
+            parts.extend(["--top", str(top_k)])
+            return " ".join(parts)
+        if button_id == "analysis_metrics_btn":
+            parts = ["/metrics"]
+            if path:
+                parts.extend(["--path", path])
+            parts.extend(["--top", str(top_k)])
+            return " ".join(parts)
+        if button_id == "analysis_doctor_btn":
+            return "/doctor"
         return None
 
     @on(Button.Pressed)

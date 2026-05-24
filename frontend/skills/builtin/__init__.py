@@ -4,6 +4,7 @@ This module wraps CodeAnalyzer commands into Skills, and provides the
 Patch/Rollback execution skills (WBS-4).
 """
 
+import os
 from typing import Any, Dict, Optional
 
 from ..models import (
@@ -48,6 +49,9 @@ def execute_builtin_skill(
         "builtin.deps": execute_deps,
         "builtin.recall": execute_recall,
         "builtin.impact": execute_impact,
+        "builtin.tasks": execute_tasks,
+        "builtin.metrics": execute_metrics,
+        "builtin.doctor": execute_doctor,
         "builtin.patch.diff": execute_patch_diff,
         "builtin.patch.apply": execute_patch_apply,
         "builtin.patch.rollback": execute_patch_rollback,
@@ -247,6 +251,125 @@ IMPACT_MANIFEST = SkillManifest(
     is_builtin=True,
 )
 
+TASKS_MANIFEST = SkillManifest(
+    skill_id="builtin.tasks",
+    name="Task Index",
+    version="1.0.0",
+    description="Scan TODO/FIXME/BUG/HACK/NOTE markers and Markdown task lists",
+    category="analysis",
+    parameters=[
+        SkillParameter(
+            name="tag",
+            type="string",
+            required=False,
+            default="",
+            description="Optional tag filter such as TODO, FIXME, BUG, HACK, NOTE, or CHECKBOX",
+        ),
+        SkillParameter(
+            name="owner",
+            type="string",
+            required=False,
+            default="",
+            description="Optional owner filter for markers like TODO(alice)",
+        ),
+        SkillParameter(
+            name="path",
+            type="string",
+            required=False,
+            default="",
+            description="Optional path substring filter such as examples/",
+        ),
+        SkillParameter(
+            name="include_done",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Include completed Markdown checklist items",
+        ),
+        SkillParameter(
+            name="include_tests",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Include test files such as test_*.py and tests/ directories",
+        ),
+        SkillParameter(
+            name="limit",
+            type="integer",
+            required=False,
+            default=50,
+            description="Maximum number of tasks to return",
+        ),
+    ],
+    output=SkillOutput(type="json", description="Task index with counts and locations"),
+    permissions=[SkillPermissionLevel.READ_ONLY],
+    command_aliases=["/tasks"],
+    is_builtin=True,
+)
+
+METRICS_MANIFEST = SkillManifest(
+    skill_id="builtin.metrics",
+    name="Code Metrics",
+    version="1.0.0",
+    description="Analyze complexity, dependency fan-in/fan-out, cycles, and maintainability hotspots",
+    category="analysis",
+    parameters=[
+        SkillParameter(
+            name="top_n",
+            type="integer",
+            required=False,
+            default=10,
+            description="Number of hotspots/functions/cycles to return",
+        ),
+        SkillParameter(
+            name="path",
+            type="string",
+            required=False,
+            default="",
+            description="Optional path substring filter such as examples/",
+        ),
+        SkillParameter(
+            name="include_tests",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Include test files such as test_*.py and tests/ directories",
+        ),
+    ],
+    output=SkillOutput(type="json", description="Project complexity and hotspot metrics"),
+    permissions=[SkillPermissionLevel.READ_ONLY],
+    command_aliases=["/metrics"],
+    is_builtin=True,
+)
+
+DOCTOR_MANIFEST = SkillManifest(
+    skill_id="builtin.doctor",
+    name="Project Doctor",
+    version="1.0.0",
+    description="Run project-wide diagnostics across core NJUCode features",
+    category="testing",
+    parameters=[
+        SkillParameter(
+            name="verbose",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Show issue details for passing checks too",
+        ),
+        SkillParameter(
+            name="include_slow",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Reserved for slower future checks",
+        ),
+    ],
+    output=SkillOutput(type="json", description="Project doctor report"),
+    permissions=[SkillPermissionLevel.READ_ONLY],
+    command_aliases=["/doctor"],
+    is_builtin=True,
+)
+
 # ============== Patch/Rollback Skill Manifests (WBS-4) ==============
 
 PATCH_DIFF_MANIFEST = SkillManifest(
@@ -427,6 +550,9 @@ BUILTIN_MANIFESTS = [
     DEPS_MANIFEST,
     RECALL_MANIFEST,
     IMPACT_MANIFEST,
+    TASKS_MANIFEST,
+    METRICS_MANIFEST,
+    DOCTOR_MANIFEST,
     PATCH_DIFF_MANIFEST,
     PATCH_APPLY_MANIFEST,
     PATCH_ROLLBACK_MANIFEST,
@@ -494,6 +620,43 @@ def execute_impact(analyzer: Any, params: Dict[str, Any]) -> Dict[str, Any]:
     return analyzer.impact_analysis(
         params.get("target", ""),
         depth=params.get("depth", 2),
+    )
+
+
+def execute_tasks(analyzer: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute project task/TODO scanning."""
+    from ...services.task_index import ProjectTaskIndex
+
+    return ProjectTaskIndex(analyzer.workspace_root).scan(
+        tag=params.get("tag", ""),
+        owner=params.get("owner", ""),
+        include_done=bool(params.get("include_done", False)),
+        include_tests=bool(params.get("include_tests", False)),
+        path_filter=params.get("path", ""),
+        limit=int(params.get("limit", 50)),
+    )
+
+
+def execute_metrics(analyzer: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute static code metrics analysis."""
+    from ...services.code_metrics import ProjectMetricsAnalyzer
+
+    return ProjectMetricsAnalyzer(analyzer.workspace_root).analyze(
+        top_n=int(params.get("top_n", params.get("limit", 10))),
+        include_tests=bool(params.get("include_tests", False)),
+        path_filter=params.get("path", ""),
+    )
+
+
+def execute_doctor(analyzer: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute project-wide diagnostics."""
+    from ...services.project_testing import run_doctor_as_payload
+
+    return run_doctor_as_payload(
+        analyzer.workspace_root,
+        include_slow=bool(params.get("include_slow", False)),
+        verbose=bool(params.get("verbose", False)),
+        save_report=os.environ.get("NJU_CODE_DISABLE_DOCTOR_REPORT") != "1",
     )
 
 
