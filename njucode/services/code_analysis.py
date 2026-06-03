@@ -437,7 +437,7 @@ class CodeAnalyzer:
             path_weight = 0.0
             if "/core/" in f"/{path_lower}/" or path_lower.startswith("src/core"):
                 path_weight += 1.5
-            if path_lower.startswith("frontend/"):
+            if path_lower.startswith("njucode/"):
                 path_weight += 0.5
 
             total = keyword_score + symbol_score + path_weight

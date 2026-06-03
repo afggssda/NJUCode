@@ -3,6 +3,7 @@
 Run from the repository root with:
 
     python test_all_features.py
+    python test_all_features.py --coverage
 
 The file intentionally uses only the Python standard library test runner so it
 can run in a fresh conda environment after ``pip install -r requirements.txt``.
@@ -13,6 +14,7 @@ for full-system checks.
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import shutil
@@ -24,6 +26,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+
+CORE_COVERAGE_FILES = [
+    "njucode/models.py",
+    "njucode/mcp/models.py",
+    "njucode/mcp/tool_adapter.py",
+    "njucode/skills/models.py",
+    "njucode/services/code_analysis.py",
+    "njucode/services/code_extractor.py",
+    "njucode/services/code_metrics.py",
+    "njucode/services/context_compressor.py",
+    "njucode/services/openai_client.py",
+    "njucode/services/project_testing.py",
+    "njucode/services/runtime_tools.py",
+    "njucode/services/task_index.py",
+]
 
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 # The standalone unittest report is the only report we want from this script.
@@ -37,7 +54,7 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     # The project is not packaged as an installable wheel, so tests add the
-    # repository root to sys.path before importing frontend.* modules.
+    # repository root to sys.path before importing njucode.* modules.
     sys.path.insert(0, str(ROOT))
 
 
@@ -286,10 +303,127 @@ def _write_unittest_report(
     return md_path, json_path
 
 
+def _coverage_requested(argv: list[str]) -> bool:
+    """Return whether this test run should collect line coverage."""
+
+    return "--coverage" in argv or os.environ.get("NJU_CODE_COVERAGE") == "1"
+
+
+def _start_coverage(argv: list[str]) -> Any:
+    """Start coverage.py when requested, returning the collector or None."""
+
+    if not _coverage_requested(argv):
+        return None
+    try:
+        import coverage  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "coverage is not installed; run `pip install coverage` or "
+            "`pip install -r requirements.txt` first"
+        ) from exc
+
+    reports_dir = ROOT / ".nju_code" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    collector = coverage.Coverage(
+        branch=True,
+        data_file=str(reports_dir / f".coverage_{uuid4().hex}"),
+        include=[str(ROOT / item) for item in CORE_COVERAGE_FILES],
+        omit=[
+            str(ROOT / ".nju_code" / "*"),
+            str(ROOT / ".test_tmp" / "*"),
+            str(ROOT / "test_all_features.py"),
+            str(ROOT / "__pycache__" / "*"),
+        ],
+    )
+    collector.start()
+    return collector
+
+
+def _write_coverage_report(
+    collector: Any,
+    finished_at: datetime,
+    test_result: ReportingTextTestResult,
+) -> tuple[Path, Path, Path]:
+    """Persist JSON, Markdown, and HTML coverage reports."""
+
+    reports_dir = ROOT / ".nju_code" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = finished_at.strftime("%Y%m%d_%H%M%S")
+    stem = f"coverage_{timestamp}_{uuid4().hex[:8]}"
+    json_path = reports_dir / f"{stem}.json"
+    md_path = reports_dir / f"{stem}.md"
+    html_dir = reports_dir / f"{stem}_html"
+
+    text_report = io.StringIO()
+    combined_percent = collector.report(
+        file=text_report,
+        show_missing=False,
+        skip_empty=True,
+        ignore_errors=True,
+    )
+    collector.json_report(outfile=str(json_path), pretty_print=True, ignore_errors=True)
+    collector.html_report(directory=str(html_dir), ignore_errors=True)
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    totals = payload.get("totals", {})
+    statement_percent = float(totals.get("percent_statements_covered", combined_percent))
+    branch_percent = float(totals.get("percent_branches_covered", 100.0))
+    files = payload.get("files", {})
+    low_files: list[tuple[float, str, dict[str, Any]]] = []
+    for path, info in files.items():
+        summary = info.get("summary", {})
+        if summary.get("num_statements", 0) > 0:
+            low_files.append((float(summary.get("percent_covered", 0.0)), path, summary))
+    low_files.sort(key=lambda item: (item[0], item[1]))
+
+    status = "PASS" if test_result.wasSuccessful() else "FAIL"
+    lines = [
+        f"# Coverage Report: statements {round(statement_percent, 2)}%, branches {round(branch_percent, 2)}%",
+        "",
+        f"- Workspace: `{ROOT}`",
+        f"- Generated: `{finished_at.isoformat(timespec='seconds')}`",
+        f"- Test status: `{status}`",
+        f"- Scope: core regression modules (`{len(CORE_COVERAGE_FILES)}` files)",
+        "- Target: statements >= 90%, branches >= 60%",
+        f"- HTML report: `{html_dir.relative_to(ROOT).as_posix()}/index.html`",
+        f"- JSON report: `{json_path.relative_to(ROOT).as_posix()}`",
+        "",
+        "## Totals",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+        f"| Covered lines | {totals.get('covered_lines', 0)} |",
+        f"| Missing lines | {totals.get('missing_lines', 0)} |",
+        f"| Statements | {totals.get('num_statements', 0)} |",
+        f"| Excluded lines | {totals.get('excluded_lines', 0)} |",
+        f"| Covered branches | {totals.get('covered_branches', 0)} |",
+        f"| Missing branches | {totals.get('missing_branches', 0)} |",
+        f"| Branches | {totals.get('num_branches', 0)} |",
+        f"| Statement coverage | {round(statement_percent, 2)}% |",
+        f"| Branch coverage | {round(branch_percent, 2)}% |",
+        f"| Combined coverage.py Cover | {round(float(totals.get('percent_covered', combined_percent)), 2)}% |",
+        "",
+        "## Lowest Covered Files",
+        "",
+        "| File | Coverage | Statements | Missing |",
+        "|---|---:|---:|---:|",
+    ]
+    for percent, path, summary in low_files[:15]:
+        lines.append(
+            f"| `{path}` | {round(percent, 2)}% | "
+            f"{summary.get('num_statements', 0)} | {summary.get('missing_lines', 0)} |"
+        )
+
+    lines.extend(["", "## Text Summary", "", "```text", text_report.getvalue().strip(), "```"])
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return md_path, json_path, html_dir
+
+
 def _selected_test_names(argv: list[str]) -> list[str]:
     """Extract unittest name filters while ignoring simple runner flags."""
 
-    return [arg for arg in argv if not arg.startswith("-")]
+    runner_flags = {"--coverage"}
+    return [arg for arg in argv if not arg.startswith("-") and arg not in runner_flags]
 
 
 def run_tests_with_report(argv: list[str]) -> int:
@@ -305,6 +439,7 @@ def run_tests_with_report(argv: list[str]) -> int:
     verbosity = 1 if "-q" in argv or "--quiet" in argv else 2
     started_at = datetime.now()
     start_time = time.perf_counter()
+    coverage_collector = _start_coverage(argv)
     runner = unittest.TextTestRunner(
         verbosity=verbosity,
         resultclass=ReportingTextTestResult,
@@ -312,6 +447,9 @@ def run_tests_with_report(argv: list[str]) -> int:
     result = runner.run(suite)
     finished_at = datetime.now()
     elapsed_seconds = time.perf_counter() - start_time
+    if coverage_collector is not None:
+        coverage_collector.stop()
+        coverage_collector.save()
 
     md_path, json_path = _write_unittest_report(
         result,
@@ -323,6 +461,16 @@ def run_tests_with_report(argv: list[str]) -> int:
     print(f"\nTest report saved:")
     print(f"  Markdown: {md_path.relative_to(ROOT).as_posix()}")
     print(f"  JSON    : {json_path.relative_to(ROOT).as_posix()}")
+    if coverage_collector is not None:
+        cov_md, cov_json, cov_html = _write_coverage_report(
+            coverage_collector,
+            finished_at,
+            result,
+        )
+        print("Coverage report saved:")
+        print(f"  Markdown: {cov_md.relative_to(ROOT).as_posix()}")
+        print(f"  JSON    : {cov_json.relative_to(ROOT).as_posix()}")
+        print(f"  HTML    : {cov_html.relative_to(ROOT).as_posix()}/index.html")
     return 0 if result.wasSuccessful() else 1
 
 
@@ -337,12 +485,12 @@ class ProjectRepositoryTests(unittest.TestCase):
             "main.py",
             "requirements.txt",
             "README.md",
-            "frontend/app.py",
-            "frontend/state.py",
-            "frontend/services/code_analysis.py",
-            "frontend/services/project_testing.py",
-            "frontend/skills/builtin/__init__.py",
-            "frontend/mcp/manager.py",
+            "njucode/app.py",
+            "njucode/state.py",
+            "njucode/services/code_analysis.py",
+            "njucode/services/project_testing.py",
+            "njucode/skills/builtin/__init__.py",
+            "njucode/mcp/manager.py",
             "test_all_features.py",
         ]
         missing = [item for item in required if not (ROOT / item).exists()]
@@ -521,6 +669,30 @@ class CodeAnalyzerTests(unittest.TestCase):
         self.assertGreater(len(scan_text), 10)
         self.assertGreater(len(search_text), 10)
 
+    def test_code_analyzer_edge_paths_and_project_report_text(self) -> None:
+        # Cover command parser fallbacks and display paths that are easy to miss
+        # in happy-path command tests.
+        from njucode.services.project_testing import ProjectCheckResult, ProjectTestReport
+
+        self.analyzer.set_workspace_root(self.root)
+        self.assertEqual("", self.analyzer._line_context("", 1))
+        self.assertEqual("tiny", self.analyzer._shorten("tiny", max_len=20))
+        self.assertTrue(self.analyzer._shorten("x" * 40, max_len=10).endswith("..."))
+        self.assertEqual("error", self.analyzer.run_command("   ")["type"])
+        self.assertEqual("scan", self.analyzer.run_command('/scan "unterminated')["type"])
+
+        missing_impact = self.analyzer.impact_analysis("MissingSymbol")
+        self.assertEqual("target_not_found", missing_impact["error"])
+
+        report = ProjectTestReport(
+            workspace=str(self.root),
+            generated_at="2026-06-03T00:00:00",
+            results=[ProjectCheckResult("layout", "pass", "ok")],
+        )
+        payload = report.to_dict()
+        payload["text"] = "[Project Doctor] PASS"
+        self.assertIn("[Project Doctor]", self.analyzer.to_text(payload))
+
 
 class CodeMetricsTests(unittest.TestCase):
     """Tests for static complexity, dependency, and hotspot analysis."""
@@ -587,6 +759,49 @@ class CodeMetricsTests(unittest.TestCase):
 
         scoped = ProjectMetricsAnalyzer(self.root).analyze(top_n=10, path_filter="pkg/a.py")
         self.assertEqual(["pkg/a.py"], [item["path"] for item in scoped["hotspots"]])
+
+    def test_metrics_counts_modern_control_flow(self) -> None:
+        # This fixture exercises async defs, match/case, comprehensions, ternary
+        # expressions, and try/else/finally so the complexity counter's branch
+        # accounting is covered beyond the simple for/if fixture above.
+        write(
+            self.root / "pkg" / "modern.py",
+            "\n".join(
+                [
+                    "async def async_value(items):",
+                    "    return [item async for item in items]",
+                    "",
+                    "def classify(value, items):",
+                    "    nested = lambda x: x + 1",
+                    "    def helper(flag):",
+                    "        return 1 if flag else 0",
+                    "    match value:",
+                    "        case 0:",
+                    "            result = helper(False)",
+                    "        case 1 | 2:",
+                    "            result = helper(True)",
+                    "        case _:",
+                    "            result = sum(x for x in items if x > 0)",
+                    "    try:",
+                    "        parsed = int(value)",
+                    "    except ValueError:",
+                    "        parsed = 0",
+                    "    else:",
+                    "        parsed += 1",
+                    "    finally:",
+                    "        parsed += nested(0)",
+                    "    return result + parsed",
+                ]
+            )
+            + "\n",
+        )
+        from njucode.services.code_metrics import ProjectMetricsAnalyzer
+
+        result = ProjectMetricsAnalyzer(self.root).analyze(top_n=10, path_filter="modern.py")
+        names = {item["name"]: item for item in result["complex_functions"]}
+        self.assertIn("async_value", names)
+        self.assertIn("classify", names)
+        self.assertGreaterEqual(names["classify"]["complexity"], 8)
 
     def test_code_analyzer_metrics_command_and_text_output(self) -> None:
         # Slash command output should include hotspot and complex-function sections.
@@ -691,6 +906,24 @@ class ProjectTaskIndexTests(unittest.TestCase):
 
         with_tests = scanner.scan(tag="TODO", include_tests=True)
         self.assertTrue(any(item["path"] == "test_noise.py" for item in with_tests["items"]))
+
+    def test_task_index_handles_text_and_unreadable_edge_cases(self) -> None:
+        # Non-Python files use comment-prefix parsing, while malformed Python
+        # files should fail soft instead of crashing the scanner.
+        from njucode.services.task_index import ProjectTaskIndex
+
+        write(self.root / "plain.txt", "# HACK: plain text comment task\nBUG: no prefix ignored\n")
+        write(self.root / "broken.py", '"""unterminated\n# TODO: tokenizer never reaches this\n')
+        write(self.root / "binary.bin", "# TODO: unsupported suffix ignored\n")
+        write(self.root / "huge.txt", "# TODO: too large ignored\n" + ("x" * 200))
+
+        scanner = ProjectTaskIndex(self.root, max_file_bytes=100)
+        result = scanner.scan(include_tests=True)
+        items = {(item["path"], item["tag"], item["text"]) for item in result["items"]}
+        self.assertIn(("plain.txt", "HACK", "plain text comment task"), items)
+        self.assertFalse(any(item[0] == "broken.py" for item in items))
+        self.assertFalse(any(item[0] == "binary.bin" for item in items))
+        self.assertFalse(any(item[0] == "huge.txt" for item in items))
 
     def test_code_analyzer_tasks_command_and_text_output(self) -> None:
         # Slash commands and chat rendering share the same payload shape.
@@ -802,6 +1035,7 @@ class ContextCompressorTests(unittest.TestCase):
         # Bilingual token estimation is important because the project docs are Chinese.
         from njucode.services.context_compressor import ContextCompressor
 
+        self.assertEqual(0, ContextCompressor.estimate_text_tokens_static(""))
         ascii_tokens = ContextCompressor.estimate_text_tokens_static("abcd" * 10)
         cjk_tokens = ContextCompressor.estimate_text_tokens_static("南京大学" * 10)
         self.assertGreater(ascii_tokens, 0)
@@ -863,6 +1097,109 @@ class ContextCompressorTests(unittest.TestCase):
         self.assertEqual(1, compressor.get_compression_count())
         self.assertGreaterEqual(compressor.get_total_tokens_saved(), 0)
         self.assertIn("token", compressor.format_compression_stats())
+
+    def test_context_compressor_validation_prompt_and_fallback_paths(self) -> None:
+        # Small helper branches affect whether compression is trusted or degraded.
+        from njucode.models import ChatMessage, ModelConfig
+        from njucode.services.context_compressor import ContextCompressor
+
+        compressor = ContextCompressor(FakeModelClient(), ModelConfig(), token_threshold=0)
+        messages = [
+            ChatMessage("user", "请修改配置文件" + "x" * 1100),
+            ChatMessage("assistant", "可以，我会保留关键上下文"),
+        ]
+
+        self.assertEqual(0.0, compressor.get_token_usage_ratio(messages))
+        self.assertEqual(compressor.keep_recent, compressor._compute_adaptive_keep_recent([]))
+        self.assertFalse(compressor._validate_summary(""))
+        self.assertFalse(compressor._validate_summary("too short"))
+        self.assertTrue(compressor._validate_summary("【用户意图】" + "用户希望继续维护项目。" * 4))
+
+        prompt = compressor._build_summary_prompt(
+            messages,
+            existing_summary="旧摘要\n保留结论",
+            session_title="Coverage Work",
+        )
+        self.assertIn("Coverage Work", prompt)
+        self.assertIn("已有历史摘要", prompt)
+        self.assertIn("已截断", prompt)
+        self.assertIn("[用户]", prompt)
+        self.assertIn("[助手]", prompt)
+
+        fallback = compressor._build_fallback_summary(messages, existing_summary="old\nsummary")
+        self.assertIn("已有摘要片段", fallback)
+        self.assertIn("关键结论", fallback)
+
+        summary, used_fallback = compressor.generate_summary(messages, existing_summary="old")
+        self.assertTrue(used_fallback)
+        self.assertIn("自动降级摘要", summary)
+        self.assertIn("尚未发生", compressor.format_compression_stats())
+
+    def test_context_compressor_generate_summary_retry_and_error_paths(self) -> None:
+        # Summary generation accepts valid model output, retries weak output,
+        # accepts long-but-unstructured output at the retry limit, and degrades
+        # on explicit model errors.
+        from njucode.models import ChatMessage, ModelConfig
+        from njucode.services.context_compressor import ContextCompressor
+
+        messages = [ChatMessage("user", "需要压缩历史"), ChatMessage("assistant", "好的")]
+        valid = "【关键结论】" + "已经总结出可继续对话的上下文。" * 8
+        client = FakeModelClient(valid)
+        compressor = ContextCompressor(client, ModelConfig(api_key="key"), max_summary_retries=1)
+        summary, used_fallback = compressor.generate_summary(messages, session_title="Chat 1")
+        self.assertFalse(used_fallback)
+        self.assertEqual(valid, summary)
+        self.assertEqual(1, len(client.requests))
+
+        retry_client = FakeModelClient("short")
+        retry_compressor = ContextCompressor(retry_client, ModelConfig(api_key="key"), max_summary_retries=1)
+        summary, used_fallback = retry_compressor.generate_summary(messages)
+        self.assertTrue(used_fallback)
+        self.assertIn("自动降级摘要", summary)
+        self.assertEqual(2, len(retry_client.requests))
+
+        class ErrorClient:
+            def chat(self, request: Any) -> str:
+                return "[系统错误] boom"
+
+        error_compressor = ContextCompressor(ErrorClient(), ModelConfig(api_key="key"))
+        summary, used_fallback = error_compressor.generate_summary(messages)
+        self.assertTrue(used_fallback)
+        self.assertIn("自动降级摘要", summary)
+
+    def test_context_compressor_short_history_and_record_formatting(self) -> None:
+        # Short histories should be returned unchanged; CompressionRecord should
+        # format zero-token and fallback metadata safely.
+        from datetime import datetime
+
+        from njucode.models import ChatMessage, ModelConfig
+        from njucode.services.context_compressor import CompressionRecord, ContextCompressor
+
+        compressor = ContextCompressor(
+            FakeModelClient(),
+            ModelConfig(),
+            min_messages_to_compress=5,
+        )
+        messages = [ChatMessage("user", "hello")]
+        result = compressor.compress(messages, existing_summary="existing")
+        self.assertEqual("existing", result.summary)
+        self.assertEqual(messages, result.kept_messages)
+        self.assertEqual(0, result.removed_count)
+        self.assertEqual(0, compressor.get_compression_count())
+
+        record = CompressionRecord(
+            compressed_at=datetime(2026, 6, 3, 15, 0, 0),
+            messages_removed=0,
+            token_before=0,
+            token_after=0,
+            tokens_saved=0,
+            summary_length=0,
+            used_fallback=True,
+            session_title="demo",
+        )
+        text = record.format_summary_line()
+        self.assertIn("0%", text)
+        self.assertIn("降级", text)
 
 
 class SettingsStoreTests(unittest.TestCase):
@@ -1356,6 +1693,121 @@ class OpenAIClientTests(unittest.TestCase):
         self.assertEqual("system", messages[0]["role"])
         self.assertIn("a.py", messages[0]["content"])
 
+    def test_build_messages_injects_model_file_and_ignores_missing_file(self) -> None:
+        # The optional model file is read locally and truncated into a system message.
+        from njucode.services.openai_client import OpenAICompatibleClient, OpenAIRequest
+
+        client = OpenAICompatibleClient()
+        with make_workspace() as tmp:
+            root = Path(tmp)
+            model_file = root / "model_context.md"
+            model_file.write_text("重要配置\n" + "x" * 5000, encoding="utf-8")
+            request = OpenAIRequest(
+                base_url="https://example.test/v1",
+                api_key="x",
+                model="demo",
+                messages=[{"role": "user", "content": "hello"}],
+                model_file=str(model_file),
+            )
+            messages = client._build_messages(request)
+            self.assertEqual("system", messages[0]["role"])
+            self.assertIn("配置的指定文件内容", messages[0]["content"])
+            self.assertLess(len(messages[0]["content"]), 4100)
+
+            missing = OpenAIRequest(
+                base_url="https://example.test/v1",
+                api_key="x",
+                model="demo",
+                messages=[{"role": "user", "content": "hello"}],
+                model_file=str(root / "missing.md"),
+            )
+            self.assertEqual([{"role": "user", "content": "hello"}], client._build_messages(missing))
+
+    def test_stream_chat_yields_chunks_closes_response_and_honors_stop(self) -> None:
+        # Streaming is tested with a local fake OpenAI object, not the network.
+        from threading import Event
+        from unittest.mock import patch
+
+        from njucode.services.openai_client import OpenAICompatibleClient, OpenAIRequest
+
+        class Delta:
+            def __init__(self, content: str | None) -> None:
+                self.content = content
+
+        class Choice:
+            def __init__(self, content: str | None) -> None:
+                self.delta = Delta(content)
+
+        class Chunk:
+            def __init__(self, content: str | None = None, choices: list[Any] | None = None) -> None:
+                self.choices = choices if choices is not None else [Choice(content)]
+
+        class FakeResponse:
+            closed = False
+
+            def __init__(self, chunks: list[Chunk]) -> None:
+                self._chunks = chunks
+
+            def __iter__(self):
+                return iter(self._chunks)
+
+            def close(self) -> None:
+                FakeResponse.closed = True
+
+        class FakeCompletions:
+            last_kwargs: dict[str, Any] = {}
+
+            def create(self, **kwargs: Any) -> FakeResponse:
+                FakeCompletions.last_kwargs = kwargs
+                return FakeResponse([Chunk(choices=[]), Chunk(None), Chunk("hello"), Chunk(" world")])
+
+        class FakeOpenAI:
+            def __init__(self, base_url: str, api_key: str) -> None:
+                self.chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+        client = OpenAICompatibleClient()
+        request = OpenAIRequest(
+            base_url="https://example.test/v1",
+            api_key="key",
+            model="demo",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        with patch("njucode.services.openai_client.OpenAI", FakeOpenAI):
+            chunks = list(client.stream_chat(request))
+        self.assertEqual(["hello", " world"], chunks)
+        self.assertTrue(FakeResponse.closed)
+        self.assertTrue(FakeCompletions.last_kwargs["stream"])
+        self.assertEqual(request, client.last_request)
+
+        stop_event = Event()
+        stop_event.set()
+        FakeResponse.closed = False
+        with patch("njucode.services.openai_client.OpenAI", FakeOpenAI):
+            self.assertEqual([], list(client.stream_chat(request, stop_event=stop_event)))
+        self.assertTrue(FakeResponse.closed)
+
+    def test_chat_handles_empty_response_and_stream_errors(self) -> None:
+        # Non-stream chat aggregates chunks and turns stream failures into text.
+        from njucode.services.openai_client import OpenAICompatibleClient, OpenAIRequest
+
+        request = OpenAIRequest(
+            base_url="https://example.test/v1",
+            api_key="key",
+            model="demo",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+        client = OpenAICompatibleClient()
+        client.stream_chat = lambda request: iter(["  "])  # type: ignore[method-assign]
+        self.assertIn("模型返回为空", client.chat(request))
+
+        def failing_stream(request: Any):
+            raise RuntimeError("offline")
+            yield ""
+
+        client.stream_chat = failing_stream  # type: ignore[method-assign]
+        self.assertIn("调用模型失败", client.chat(request))
+
 
 class ProjectDoctorTests(unittest.TestCase):
     """Tests for the Project Doctor report and command/skill integration."""
@@ -1394,6 +1846,21 @@ class ProjectDoctorTests(unittest.TestCase):
         self.assertIn("text", payload)
         self.assertIn("markdown", payload)
         self.assertIn("layout", payload["text"])
+
+    def test_doctor_payload_can_save_report_files(self) -> None:
+        # The application-time /doctor path saves Markdown and JSON artifacts;
+        # the standalone test runner disables this except when explicitly asked.
+        from njucode.services.project_testing import run_doctor_as_payload
+
+        with make_workspace() as tmp:
+            root = Path(tmp)
+            write(root / "README.md", "demo\n")
+            payload = run_doctor_as_payload(root, selected=["layout"], save_report=True)
+            self.assertIn("markdown_path", payload)
+            self.assertIn("json_path", payload)
+            self.assertIn("[Saved Report]", payload["text"])
+            self.assertTrue((root / payload["markdown_path"]).exists())
+            self.assertTrue((root / payload["json_path"]).exists())
 
     def test_code_analyzer_doctor_command(self) -> None:
         # /doctor is wired through CodeAnalyzer.run_command.
@@ -1436,6 +1903,36 @@ class ProjectDoctorTests(unittest.TestCase):
         text = report_to_text(report)
         self.assertIn("[WARN] warn", text)
         self.assertIn("watch", text)
+
+    def test_report_helpers_cover_status_and_long_issue_lists(self) -> None:
+        # Status helpers and long issue truncation are small, but they shape the
+        # chat-facing doctor summary.
+        from njucode.services.project_testing import (
+            ProjectCheckResult,
+            ProjectIssue,
+            ProjectTestReport,
+            report_to_text,
+        )
+
+        failing = ProjectCheckResult(
+            "fail",
+            "fail",
+            "broken",
+            issues=[ProjectIssue("error", f"issue-{idx}", hint="fix") for idx in range(12)],
+        )
+        warning = ProjectCheckResult("warn", "warn", "careful")
+        skipped = ProjectCheckResult("skip", "skip", "not needed")
+        self.assertTrue(failing.failed)
+        self.assertTrue(warning.warned)
+        report = ProjectTestReport(
+            workspace="demo",
+            generated_at=datetime.now().isoformat(timespec="seconds"),
+            results=[failing, warning, skipped],
+        )
+        text = report_to_text(report, verbose=True)
+        self.assertIn("[FAIL] fail", text)
+        self.assertIn("[SKIP] skip", text)
+        self.assertIn("more issue", text)
 
 
 class DocumentationTests(unittest.TestCase):

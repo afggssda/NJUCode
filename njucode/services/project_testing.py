@@ -46,25 +46,25 @@ REQUIRED_TOP_LEVEL = [
     "main.py",
     "requirements.txt",
     "README.md",
-    "frontend",
-    "frontend/app.py",
-    "frontend/models.py",
-    "frontend/state.py",
-    "frontend/services",
-    "frontend/services/code_analysis.py",
-    "frontend/services/openai_client.py",
-    "frontend/services/context_compressor.py",
-    "frontend/services/patch_engine.py",
-    "frontend/services/code_extractor.py",
-    "frontend/skills",
-    "frontend/skills/models.py",
-    "frontend/skills/registry.py",
-    "frontend/skills/executor.py",
-    "frontend/skills/builtin/__init__.py",
-    "frontend/mcp",
-    "frontend/mcp/manager.py",
-    "frontend/mcp/client.py",
-    "frontend/ui/widgets",
+    "njucode",
+    "njucode/app.py",
+    "njucode/models.py",
+    "njucode/state.py",
+    "njucode/services",
+    "njucode/services/code_analysis.py",
+    "njucode/services/openai_client.py",
+    "njucode/services/context_compressor.py",
+    "njucode/services/patch_engine.py",
+    "njucode/services/code_extractor.py",
+    "njucode/skills",
+    "njucode/skills/models.py",
+    "njucode/skills/registry.py",
+    "njucode/skills/executor.py",
+    "njucode/skills/builtin/__init__.py",
+    "njucode/mcp",
+    "njucode/mcp/manager.py",
+    "njucode/mcp/client.py",
+    "njucode/ui/widgets",
 ]
 
 
@@ -393,7 +393,7 @@ class ProjectTestRunner:
                         path=rel_path,
                     )
                 )
-        widget_dir = self._path("frontend/ui/widgets")
+        widget_dir = self._path("njucode/ui/widgets")
         widget_missing = []
         for filename in REQUIRED_WIDGET_FILES:
             if not (widget_dir / filename).exists():
@@ -402,7 +402,7 @@ class ProjectTestRunner:
                     ProjectIssue(
                         severity="error",
                         message="required widget module is missing",
-                        path=f"frontend/ui/widgets/{filename}",
+                        path=f"njucode/ui/widgets/{filename}",
                     )
                 )
         status = "pass" if not missing else "fail"
@@ -551,7 +551,7 @@ class ProjectTestRunner:
 
             title = getattr(NjuCodeApp, "TITLE", "")
             if not title:
-                issues.append(ProjectIssue("warning", "NjuCodeApp.TITLE is empty", "frontend/app.py"))
+                issues.append(ProjectIssue("warning", "NjuCodeApp.TITLE is empty", "njucode/app.py"))
             if not hasattr(main, "NjuCodeApp"):
                 issues.append(ProjectIssue("warning", "main.py does not expose NjuCodeApp", "main.py"))
         except Exception as exc:
@@ -585,23 +585,23 @@ class ProjectTestRunner:
         # NjuCodeApp is a stable symbol that should exist in the main TUI file.
         metrics["nju_code_app_hits"] = search.get("hit_count", 0)
         if search.get("hit_count", 0) <= 0:
-            issues.append(ProjectIssue("error", "text search could not find NjuCodeApp", "frontend/app.py"))
+            issues.append(ProjectIssue("error", "text search could not find NjuCodeApp", "njucode/app.py"))
 
         symbol = analyzer.symbol_search("NjuCodeApp")
         # Symbol search is Python-specific, so it complements text search.
         metrics["symbol_hits"] = symbol.get("hit_count", 0)
         if symbol.get("hit_count", 0) <= 0:
-            issues.append(ProjectIssue("error", "symbol search could not find NjuCodeApp", "frontend/app.py"))
+            issues.append(ProjectIssue("error", "symbol search could not find NjuCodeApp", "njucode/app.py"))
 
-        summary = analyzer.summarize_file("frontend/app.py")
+        summary = analyzer.summarize_file("njucode/app.py")
         # app.py is large enough to exercise class/function/import extraction.
         if summary.get("type") != "file_summary" or summary.get("error"):
-            issues.append(ProjectIssue("error", "file summary failed for frontend/app.py", "frontend/app.py"))
+            issues.append(ProjectIssue("error", "file summary failed for njucode/app.py", "njucode/app.py"))
 
-        deps = analyzer.neighbors("frontend/app.py", depth=1)
+        deps = analyzer.neighbors("njucode/app.py", depth=1)
         # Dependency neighbors are the data behind /deps.
         if deps.get("type") != "neighbors":
-            issues.append(ProjectIssue("error", "dependency neighbor analysis failed", "frontend/app.py"))
+            issues.append(ProjectIssue("error", "dependency neighbor analysis failed", "njucode/app.py"))
 
         recall = analyzer.recall_files("patch rollback skills", top_k=5)
         # Natural-language recall is intentionally fuzzy, so this check focuses
@@ -633,7 +633,7 @@ class ProjectTestRunner:
 
         sample = (
             "Here is a change.\n"
-            "```python frontend/app.py\n"
+            "```python njucode/app.py\n"
             "class Example:\n"
             "    pass\n"
             "```\n"
@@ -641,18 +641,18 @@ class ProjectTestRunner:
             "python main.py\n"
             "```\n"
             "```python\n"
-            "# frontend/a.py\n"
+            "# njucode/a.py\n"
             "A = 1\n"
-            "# frontend/b.py\n"
+            "# njucode/b.py\n"
             "B = 2\n"
             "```\n"
         )
         blocks = extract_code_blocks(sample)
         filenames = [block.filename for block in blocks]
         issues: list[ProjectIssue] = []
-        if "frontend/app.py" not in filenames:
+        if "njucode/app.py" not in filenames:
             issues.append(ProjectIssue("error", "filename hint was not parsed"))
-        if "frontend/a.py" not in filenames or "frontend/b.py" not in filenames:
+        if "njucode/a.py" not in filenames or "njucode/b.py" not in filenames:
             issues.append(ProjectIssue("error", "multi-file code block was not split"))
         if any(block.language in {"bash", "sh"} for block in blocks):
             issues.append(ProjectIssue("error", "shell block should have been filtered"))
@@ -888,28 +888,28 @@ class ProjectTestRunner:
         # without launching a terminal UI session.
         # It looks for stable IDs because Textual event handlers rely on them.
         issues: list[ProjectIssue] = []
-        app_text = self._read_text("frontend/app.py")
-        tools_text = self._read_text("frontend/ui/widgets/tools_panel.py")
+        app_text = self._read_text("njucode/app.py")
+        tools_text = self._read_text("njucode/ui/widgets/tools_panel.py")
         required_tabs = ["explorer", "chats", "code", "tools", "skills", "mcp", "patch", "model", "chat"]
         for tab_id in required_tabs:
             if f'id="{tab_id}"' not in app_text and f"id='{tab_id}'" not in app_text:
-                issues.append(ProjectIssue("error", f"tab id is not declared: {tab_id}", "frontend/app.py"))
+                issues.append(ProjectIssue("error", f"tab id is not declared: {tab_id}", "njucode/app.py"))
         required_bindings = ["ctrl+n", "ctrl+h", "ctrl+c", "ctrl+q"]
         for binding in required_bindings:
             if binding not in app_text:
-                issues.append(ProjectIssue("warning", f"expected key binding missing: {binding}", "frontend/app.py"))
+                issues.append(ProjectIssue("warning", f"expected key binding missing: {binding}", "njucode/app.py"))
         if "analysis_doctor_btn" not in tools_text:
-            issues.append(ProjectIssue("error", "Doctor button missing from Tools panel", "frontend/ui/widgets/tools_panel.py"))
+            issues.append(ProjectIssue("error", "Doctor button missing from Tools panel", "njucode/ui/widgets/tools_panel.py"))
         if "/doctor" not in tools_text:
-            issues.append(ProjectIssue("error", "Tools panel does not dispatch /doctor", "frontend/ui/widgets/tools_panel.py"))
+            issues.append(ProjectIssue("error", "Tools panel does not dispatch /doctor", "njucode/ui/widgets/tools_panel.py"))
         if "analysis_tasks_btn" not in tools_text:
-            issues.append(ProjectIssue("error", "Tasks button missing from Tools panel", "frontend/ui/widgets/tools_panel.py"))
+            issues.append(ProjectIssue("error", "Tasks button missing from Tools panel", "njucode/ui/widgets/tools_panel.py"))
         if "/tasks" not in tools_text:
-            issues.append(ProjectIssue("error", "Tools panel does not dispatch /tasks", "frontend/ui/widgets/tools_panel.py"))
+            issues.append(ProjectIssue("error", "Tools panel does not dispatch /tasks", "njucode/ui/widgets/tools_panel.py"))
         if "analysis_metrics_btn" not in tools_text:
-            issues.append(ProjectIssue("error", "Metrics button missing from Tools panel", "frontend/ui/widgets/tools_panel.py"))
+            issues.append(ProjectIssue("error", "Metrics button missing from Tools panel", "njucode/ui/widgets/tools_panel.py"))
         if "/metrics" not in tools_text:
-            issues.append(ProjectIssue("error", "Tools panel does not dispatch /metrics", "frontend/ui/widgets/tools_panel.py"))
+            issues.append(ProjectIssue("error", "Tools panel does not dispatch /metrics", "njucode/ui/widgets/tools_panel.py"))
         status = "fail" if any(i.severity == "error" for i in issues) else ("warn" if issues else "pass")
         return self._result(
             "ui_structure",

@@ -155,60 +155,24 @@ python main.py
 /doctor [--verbose]
 ```
 
-`/tasks` 用于扫描项目中的 `TODO`、`FIXME`、`BUG`、`HACK`、`NOTE` 标记以及 Markdown 清单项；Tools 面板也提供 `Tasks` 按钮，可用 `query` 输入框传入标签过滤。
-
-`/metrics` 用于执行静态代码指标分析，输出 Python 文件复杂度、依赖 fan-in/fan-out、import 环和维护热点排序，可用于判断优先重构位置。
+`/tasks` 用于扫描项目中的 `TODO`、`FIXME`、`BUG`、`HACK`、`NOTE` 标记以及 Markdown 清单项；`/metrics` 用于统计复杂度、依赖关系、import 环和维护热点；`/doctor` 用于执行项目健康诊断并生成诊断报告。
 
 ### 运行综合测试
 ```bash
 python test_all_features.py
+python test_all_features.py --coverage
 ```
 
-运行结束后会自动生成 Markdown 和 JSON 测试报告：
+运行结束后会自动生成 Markdown 和 JSON 测试报告；加入 `--coverage` 时还会生成覆盖率 Markdown、JSON 和 HTML 报告。当前覆盖率统计范围为 12 个核心回归模块，目标为语句覆盖率不低于 90%、分支覆盖率不低于 60%。
 
 ```text
 .nju_code/reports/test_all_features_*.md
 .nju_code/reports/test_all_features_*.json
+.nju_code/reports/coverage_*.md
+.nju_code/reports/coverage_*.json
+.nju_code/reports/coverage_*_html/index.html
 ```
 
-也可以在应用聊天框或 Tools 面板中运行：
-```text
-/doctor
-/doctor --verbose
-```
-
-`/doctor` 运行结束后也会自动保存 Markdown 和 JSON 报告：
-
-```text
-.nju_code/reports/project_doctor_*.md
-.nju_code/reports/project_doctor_*.json
-```
-
-## 后续计划
-
-### WBS-3 完善
-- Session 记忆分层：短期会话摘要、长期会话归档、会话检索回放
-- 上下文压缩链路：按 token 预算进行文件摘要压缩、历史对话压缩与去重
-- 召回结果二次裁剪：Top-K 文件先摘要后拼接，避免上下文过长
-- 上下文质量策略：优先保留符号定义、调用链与最近改动片段
-- 输出结构补齐：保留机器可消费 JSON 到文件（非聊天窗口）用于后续 patch 接入
-
-### WBS-4 Patch 工程修改能力
-- 建立统一 patch 任务模型（约束输入，输出可审阅 diff）
-- 建立安全流程：检索 -> 影响面分析 -> patch 方案
-- 支持回滚
-
-### WBS-5 Skills 体系
-- 将检索/分析/补丁/测试拆分为可编排技能
-- 增加技能级权限与调用日志
-
-### WBS-6 模型与成本管理
-- 统计 token、时延、失败率
-- 支持多模型路由策略
-
-### WBS-7 测试与质量保障
-- 为分析引擎补齐单元测试
-- 为关键 UI 交互补齐回归检查
 
 ## 团队成员与分工
 

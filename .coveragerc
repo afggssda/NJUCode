@@ -1,0 +1,28 @@
+[run]
+branch = True
+include =
+    njucode/models.py
+    njucode/mcp/models.py
+    njucode/mcp/tool_adapter.py
+    njucode/skills/models.py
+    njucode/services/code_analysis.py
+    njucode/services/code_extractor.py
+    njucode/services/code_metrics.py
+    njucode/services/context_compressor.py
+    njucode/services/openai_client.py
+    njucode/services/project_testing.py
+    njucode/services/runtime_tools.py
+    njucode/services/task_index.py
+omit =
+    test_all_features.py
+    .nju_code/*
+    .test_tmp/*
+    __pycache__/*
+
+[report]
+show_missing = True
+skip_empty = True
+precision = 2
+
+[html]
+directory = .nju_code/reports/htmlcov
