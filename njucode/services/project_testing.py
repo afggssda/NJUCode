@@ -547,7 +547,7 @@ class ProjectTestRunner:
         issues: list[ProjectIssue] = []
         try:
             import main  # type: ignore
-            from frontend.app import NjuCodeApp
+            from ..app import NjuCodeApp
 
             title = getattr(NjuCodeApp, "TITLE", "")
             if not title:

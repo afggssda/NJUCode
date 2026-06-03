@@ -369,7 +369,7 @@ class ProjectRepositoryTests(unittest.TestCase):
     def test_main_imports_textual_application(self) -> None:
         # Importing the entrypoint is a lightweight proxy for python main.py.
         import main
-        from frontend.app import NjuCodeApp
+        from njucode.app import NjuCodeApp
 
         self.assertIs(main.NjuCodeApp, NjuCodeApp)
         self.assertIn("NJU", NjuCodeApp.TITLE)
@@ -413,7 +413,7 @@ class CodeAnalyzerTests(unittest.TestCase):
             "    return 41\n",
         )
         write(self.root / "README.md", "Alpha helper project\n")
-        from frontend.services.code_analysis import CodeAnalyzer
+        from njucode.services.code_analysis import CodeAnalyzer
 
         self.analyzer = CodeAnalyzer(self.root)
 
@@ -566,7 +566,7 @@ class CodeMetricsTests(unittest.TestCase):
 
     def test_metrics_detect_complexity_and_cycles(self) -> None:
         # a.py and b.py import each other, so Tarjan SCC detection should report a cycle.
-        from frontend.services.code_metrics import ProjectMetricsAnalyzer
+        from njucode.services.code_metrics import ProjectMetricsAnalyzer
 
         result = ProjectMetricsAnalyzer(self.root).analyze(top_n=5)
         self.assertEqual("code_metrics", result["type"])
@@ -579,7 +579,7 @@ class CodeMetricsTests(unittest.TestCase):
 
     def test_metrics_include_tests_option(self) -> None:
         # Test files are hidden by default but available for explicit audits.
-        from frontend.services.code_metrics import ProjectMetricsAnalyzer
+        from njucode.services.code_metrics import ProjectMetricsAnalyzer
 
         result = ProjectMetricsAnalyzer(self.root).analyze(top_n=10, include_tests=True)
         paths = {item["path"] for item in result["hotspots"]}
@@ -590,7 +590,7 @@ class CodeMetricsTests(unittest.TestCase):
 
     def test_code_analyzer_metrics_command_and_text_output(self) -> None:
         # Slash command output should include hotspot and complex-function sections.
-        from frontend.services.code_analysis import CodeAnalyzer
+        from njucode.services.code_analysis import CodeAnalyzer
 
         analyzer = CodeAnalyzer(self.root)
         result = analyzer.run_command("/metrics --path pkg --top 3")
@@ -602,8 +602,8 @@ class CodeMetricsTests(unittest.TestCase):
 
     def test_builtin_metrics_skill_executes(self) -> None:
         # The Skills layer exposes metrics as a read-only project analysis tool.
-        from frontend.services.code_analysis import CodeAnalyzer
-        from frontend.skills.builtin import execute_builtin_skill
+        from njucode.services.code_analysis import CodeAnalyzer
+        from njucode.skills.builtin import execute_builtin_skill
 
         result = execute_builtin_skill(
             "builtin.metrics",
@@ -659,7 +659,7 @@ class ProjectTaskIndexTests(unittest.TestCase):
 
     def test_task_index_scans_markers_and_checkboxes(self) -> None:
         # Open markers and unfinished checkboxes should appear by default.
-        from frontend.services.task_index import ProjectTaskIndex
+        from njucode.services.task_index import ProjectTaskIndex
 
         result = ProjectTaskIndex(self.root).scan()
         self.assertEqual("task_index", result["type"])
@@ -678,7 +678,7 @@ class ProjectTaskIndexTests(unittest.TestCase):
 
     def test_task_index_filters_by_tag_owner_and_done_state(self) -> None:
         # Filters make the scanner useful for focused daily work lists.
-        from frontend.services.task_index import ProjectTaskIndex
+        from njucode.services.task_index import ProjectTaskIndex
 
         scanner = ProjectTaskIndex(self.root)
         todo = scanner.scan(tag="TODO", owner="alice")
@@ -694,7 +694,7 @@ class ProjectTaskIndexTests(unittest.TestCase):
 
     def test_code_analyzer_tasks_command_and_text_output(self) -> None:
         # Slash commands and chat rendering share the same payload shape.
-        from frontend.services.code_analysis import CodeAnalyzer
+        from njucode.services.code_analysis import CodeAnalyzer
 
         analyzer = CodeAnalyzer(self.root)
         result = analyzer.run_command("/tasks --tag FIXME --path pkg --top 10")
@@ -716,8 +716,8 @@ class ProjectTaskIndexTests(unittest.TestCase):
 
     def test_builtin_tasks_skill_executes(self) -> None:
         # The Skills layer exposes the same scanner for command registry users.
-        from frontend.services.code_analysis import CodeAnalyzer
-        from frontend.skills.builtin import execute_builtin_skill
+        from njucode.services.code_analysis import CodeAnalyzer
+        from njucode.skills.builtin import execute_builtin_skill
 
         result = execute_builtin_skill(
             "builtin.tasks",
@@ -737,7 +737,7 @@ class CodeExtractorTests(unittest.TestCase):
 
     def test_extracts_filename_from_info_string(self) -> None:
         # Common model style: language followed by workspace-relative path.
-        from frontend.services.code_extractor import extract_code_blocks
+        from njucode.services.code_extractor import extract_code_blocks
 
         blocks = extract_code_blocks("```python frontend/app.py\nprint('x')\n```")
         self.assertEqual(1, len(blocks))
@@ -746,14 +746,14 @@ class CodeExtractorTests(unittest.TestCase):
 
     def test_extracts_filename_from_colon_form(self) -> None:
         # Explicit language:path form should allow bare filenames.
-        from frontend.services.code_extractor import extract_code_blocks
+        from njucode.services.code_extractor import extract_code_blocks
 
         blocks = extract_code_blocks("```python:main.py\nprint('x')\n```")
         self.assertEqual("main.py", blocks[0].filename)
 
     def test_extracts_filename_when_info_is_path(self) -> None:
         # A path-only fence should infer language from extension.
-        from frontend.services.code_extractor import extract_code_blocks
+        from njucode.services.code_extractor import extract_code_blocks
 
         blocks = extract_code_blocks("```frontend/app.py\nprint('x')\n```")
         self.assertEqual("python", blocks[0].language)
@@ -761,7 +761,7 @@ class CodeExtractorTests(unittest.TestCase):
 
     def test_filters_shell_blocks(self) -> None:
         # Shell snippets are usage examples, not patchable source files.
-        from frontend.services.code_extractor import extract_code_blocks
+        from njucode.services.code_extractor import extract_code_blocks
 
         blocks = extract_code_blocks("```bash\npython main.py\n```\n```python\nx = 1\n```")
         self.assertEqual(1, len(blocks))
@@ -769,7 +769,7 @@ class CodeExtractorTests(unittest.TestCase):
 
     def test_splits_multifile_blocks(self) -> None:
         # LLMs often return several files in one code fence with boundary comments.
-        from frontend.services.code_extractor import extract_code_blocks
+        from njucode.services.code_extractor import extract_code_blocks
 
         text = (
             "```python\n"
@@ -784,7 +784,7 @@ class CodeExtractorTests(unittest.TestCase):
 
     def test_does_not_split_single_file_boundary(self) -> None:
         # One boundary comment is not enough to prove a multi-file block.
-        from frontend.services.code_extractor import extract_code_blocks
+        from njucode.services.code_extractor import extract_code_blocks
 
         text = "```python\n# frontend/a.py\nA = 1\n```"
         blocks = extract_code_blocks(text)
@@ -800,7 +800,7 @@ class ContextCompressorTests(unittest.TestCase):
 
     def test_static_token_estimate_handles_cjk_and_ascii(self) -> None:
         # Bilingual token estimation is important because the project docs are Chinese.
-        from frontend.services.context_compressor import ContextCompressor
+        from njucode.services.context_compressor import ContextCompressor
 
         ascii_tokens = ContextCompressor.estimate_text_tokens_static("abcd" * 10)
         cjk_tokens = ContextCompressor.estimate_text_tokens_static("南京大学" * 10)
@@ -809,7 +809,7 @@ class ContextCompressorTests(unittest.TestCase):
 
     def test_message_token_estimate_includes_overhead(self) -> None:
         # Message wrappers add role/boundary overhead beyond raw text tokens.
-        from frontend.services.context_compressor import ContextCompressor
+        from njucode.services.context_compressor import ContextCompressor
 
         content_only = ContextCompressor.estimate_text_tokens_static("hello world")
         message_estimate = ContextCompressor.estimate_message_tokens_from_content("hello world")
@@ -817,8 +817,8 @@ class ContextCompressorTests(unittest.TestCase):
 
     def test_compress_produces_summary_and_keeps_recent_messages(self) -> None:
         # Compression should summarize older messages and keep the latest context.
-        from frontend.models import ChatMessage, ModelConfig
-        from frontend.services.context_compressor import ContextCompressor
+        from njucode.models import ChatMessage, ModelConfig
+        from njucode.services.context_compressor import ContextCompressor
 
         messages = [
             ChatMessage("user", "first question " * 20),
@@ -841,8 +841,8 @@ class ContextCompressorTests(unittest.TestCase):
 
     def test_compression_history_tracks_savings(self) -> None:
         # The Session panel and doctor report rely on compression statistics.
-        from frontend.models import ChatMessage, ModelConfig
-        from frontend.services.context_compressor import ContextCompressor
+        from njucode.models import ChatMessage, ModelConfig
+        from njucode.services.context_compressor import ContextCompressor
 
         compressor = ContextCompressor(
             FakeModelClient(),
@@ -873,7 +873,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_settings_roundtrip_and_backup(self) -> None:
         # Saving twice should create a backup of the previous settings file.
-        from frontend.services.settings_store import SettingsStore
+        from njucode.services.settings_store import SettingsStore
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -888,7 +888,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_session_export_import_validation(self) -> None:
         # Exported sessions must be importable by the same schema validator.
-        from frontend.services.settings_store import SettingsStore
+        from njucode.services.settings_store import SettingsStore
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -905,7 +905,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_session_import_rejects_bad_shape(self) -> None:
         # Bad imports should fail loudly instead of corrupting AppState.
-        from frontend.services.settings_store import SettingsStore
+        from njucode.services.settings_store import SettingsStore
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -917,7 +917,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_export_listing_and_cleanup(self) -> None:
         # Export cleanup keeps the .nju_code/exports directory from growing forever.
-        from frontend.services.settings_store import SettingsStore
+        from njucode.services.settings_store import SettingsStore
 
         # The cleanup method physically deletes files; skip only when the
         # current sandbox blocks unlink while still allowing normal writes.
@@ -949,7 +949,7 @@ class PatchEngineTests(unittest.TestCase):
 
     def test_patch_operation_generates_diff_and_validates_syntax(self) -> None:
         # Single-operation diff generation is used by PatchPanel previews.
-        from frontend.services.patch_engine import PatchOperation
+        from njucode.services.patch_engine import PatchOperation
 
         op = PatchOperation("demo.py", "x = 1\n", "x = 2\n")
         diff = op.generate_diff()
@@ -964,7 +964,7 @@ class PatchEngineTests(unittest.TestCase):
 
     def test_patch_task_serialization_roundtrip(self) -> None:
         # Patch history persists task dictionaries and reloads them later.
-        from frontend.services.patch_engine import PatchOperation, PatchTask
+        from njucode.services.patch_engine import PatchOperation, PatchTask
 
         task = PatchTask(description="roundtrip", operations=[PatchOperation("a.py", "", "x = 1\n")])
         clone = PatchTask.from_dict(task.to_dict())
@@ -974,7 +974,7 @@ class PatchEngineTests(unittest.TestCase):
 
     def test_patch_history_store_persists_tasks(self) -> None:
         # History persistence is checked without applying a patch.
-        from frontend.services.patch_engine import PatchEngine, PatchHistoryStore
+        from njucode.services.patch_engine import PatchEngine, PatchHistoryStore
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -987,7 +987,7 @@ class PatchEngineTests(unittest.TestCase):
 
     def test_patch_engine_apply_and_rollback_modify(self) -> None:
         # Modify rollback restores from backup without deleting files.
-        from frontend.services.patch_engine import PatchEngine, PatchHistoryStore, PatchStatus
+        from njucode.services.patch_engine import PatchEngine, PatchHistoryStore, PatchStatus
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -1009,7 +1009,7 @@ class PatchEngineTests(unittest.TestCase):
 
     def test_patch_engine_apply_and_rollback_create(self) -> None:
         # Create rollback removes the created file, so it depends on unlink permission.
-        from frontend.services.patch_engine import PatchEngine, PatchHistoryStore
+        from njucode.services.patch_engine import PatchEngine, PatchHistoryStore
 
         # Rolling back a create removes the created file, which is not permitted
         # in some sandboxed runs.
@@ -1029,7 +1029,7 @@ class PatchEngineTests(unittest.TestCase):
 
     def test_patch_engine_rejects_stale_content(self) -> None:
         # A patch must not overwrite a file changed after patch generation.
-        from frontend.services.patch_engine import PatchEngine, PatchHistoryStore
+        from njucode.services.patch_engine import PatchEngine, PatchHistoryStore
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -1044,7 +1044,7 @@ class PatchEngineTests(unittest.TestCase):
 
     def test_patch_engine_rejects_path_traversal(self) -> None:
         # Path traversal is blocked before any file write can occur.
-        from frontend.services.patch_engine import PatchEngine, PatchHistoryStore
+        from njucode.services.patch_engine import PatchEngine, PatchHistoryStore
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -1063,7 +1063,7 @@ class SkillSystemTests(unittest.TestCase):
 
     def test_builtin_manifests_have_unique_ids_and_aliases(self) -> None:
         # Duplicate aliases would make command dispatch ambiguous.
-        from frontend.skills.builtin import BUILTIN_AGENT_MANIFESTS, BUILTIN_MANIFESTS
+        from njucode.skills.builtin import BUILTIN_AGENT_MANIFESTS, BUILTIN_MANIFESTS
 
         ids = [manifest.skill_id for manifest in [*BUILTIN_MANIFESTS, *BUILTIN_AGENT_MANIFESTS]]
         aliases = [alias for manifest in BUILTIN_MANIFESTS for alias in manifest.command_aliases]
@@ -1075,8 +1075,8 @@ class SkillSystemTests(unittest.TestCase):
 
     def test_skill_registry_registers_and_finds_commands(self) -> None:
         # Registry lookup powers execute_by_command().
-        from frontend.skills.builtin import BUILTIN_MANIFESTS
-        from frontend.skills.registry import SkillRegistry
+        from njucode.skills.builtin import BUILTIN_MANIFESTS
+        from njucode.skills.registry import SkillRegistry
 
         with make_workspace() as tmp:
             registry = SkillRegistry(Path(tmp))
@@ -1090,12 +1090,12 @@ class SkillSystemTests(unittest.TestCase):
 
     def test_skill_command_parser_maps_top_to_manifest_specific_parameter(self) -> None:
         # /tasks uses limit while /metrics uses top_n; both should accept --top.
-        from frontend.models import DEFAULT_TOOLS
-        from frontend.services.code_analysis import CodeAnalyzer
-        from frontend.skills.builtin import METRICS_MANIFEST, TASKS_MANIFEST
-        from frontend.skills.executor import SkillExecutor
-        from frontend.skills.permissions import PermissionChecker
-        from frontend.skills.registry import SkillRegistry
+        from njucode.models import DEFAULT_TOOLS
+        from njucode.services.code_analysis import CodeAnalyzer
+        from njucode.skills.builtin import METRICS_MANIFEST, TASKS_MANIFEST
+        from njucode.skills.executor import SkillExecutor
+        from njucode.skills.permissions import PermissionChecker
+        from njucode.skills.registry import SkillRegistry
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -1127,12 +1127,12 @@ class SkillSystemTests(unittest.TestCase):
 
     def test_skill_executor_validates_parameters(self) -> None:
         # Parameter validation normalizes user input before skill execution.
-        from frontend.skills.builtin import SEARCH_MANIFEST
-        from frontend.skills.executor import SkillExecutor
-        from frontend.skills.permissions import PermissionChecker
-        from frontend.skills.registry import SkillRegistry
-        from frontend.models import DEFAULT_TOOLS
-        from frontend.services.code_analysis import CodeAnalyzer
+        from njucode.skills.builtin import SEARCH_MANIFEST
+        from njucode.skills.executor import SkillExecutor
+        from njucode.skills.permissions import PermissionChecker
+        from njucode.skills.registry import SkillRegistry
+        from njucode.models import DEFAULT_TOOLS
+        from njucode.services.code_analysis import CodeAnalyzer
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -1155,12 +1155,12 @@ class SkillSystemTests(unittest.TestCase):
 
     def test_skill_executor_runs_builtin_scan(self) -> None:
         # End-to-end builtin execution should emit output and an audit log.
-        from frontend.skills.builtin import SCAN_MANIFEST
-        from frontend.skills.executor import SkillExecutor
-        from frontend.skills.permissions import PermissionChecker
-        from frontend.skills.registry import SkillRegistry
-        from frontend.models import DEFAULT_TOOLS
-        from frontend.services.code_analysis import CodeAnalyzer
+        from njucode.skills.builtin import SCAN_MANIFEST
+        from njucode.skills.executor import SkillExecutor
+        from njucode.skills.permissions import PermissionChecker
+        from njucode.skills.registry import SkillRegistry
+        from njucode.models import DEFAULT_TOOLS
+        from njucode.services.code_analysis import CodeAnalyzer
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -1182,9 +1182,9 @@ class SkillSystemTests(unittest.TestCase):
 
     def test_permission_checker_blocks_disabled_tool(self) -> None:
         # Permission checks enforce AppState tool toggles.
-        from frontend.models import DEFAULT_TOOLS
-        from frontend.skills.models import SkillPermissionLevel
-        from frontend.skills.permissions import PermissionChecker
+        from njucode.models import DEFAULT_TOOLS
+        from njucode.skills.models import SkillPermissionLevel
+        from njucode.skills.permissions import PermissionChecker
 
         tools = {tool.key: tool for tool in DEFAULT_TOOLS}
         tools["write_file"].enabled = False
@@ -1202,7 +1202,7 @@ class AppStateTests(unittest.TestCase):
 
     def test_app_state_session_lifecycle(self) -> None:
         # Basic session CRUD must remain stable for the Session panel.
-        from frontend.state import AppState
+        from njucode.state import AppState
 
         with make_workspace() as tmp:
             state = AppState(Path(tmp))
@@ -1220,7 +1220,7 @@ class AppStateTests(unittest.TestCase):
 
     def test_app_state_save_does_not_persist_api_key(self) -> None:
         # Security requirement: API keys should come from env/.env, not settings.json.
-        from frontend.state import AppState
+        from njucode.state import AppState
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -1232,8 +1232,8 @@ class AppStateTests(unittest.TestCase):
 
     def test_app_state_patch_engine_wrappers(self) -> None:
         # AppState exposes thin wrappers used by app.py event handlers.
-        from frontend.services.code_analysis import CodeAnalyzer
-        from frontend.state import AppState
+        from njucode.services.code_analysis import CodeAnalyzer
+        from njucode.state import AppState
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -1252,8 +1252,8 @@ class AppStateTests(unittest.TestCase):
 
     def test_app_state_builds_agent_skill_context(self) -> None:
         # Agent skill selection injects procedural instructions into model context.
-        from frontend.services.code_analysis import CodeAnalyzer
-        from frontend.state import AppState
+        from njucode.services.code_analysis import CodeAnalyzer
+        from njucode.state import AppState
 
         with make_workspace() as tmp:
             root = Path(tmp)
@@ -1272,7 +1272,7 @@ class MCPTests(unittest.TestCase):
 
     def test_mcp_manager_loads_default_presets(self) -> None:
         # Presets should be visible even before the user connects a server.
-        from frontend.mcp.manager import MCPManager
+        from njucode.mcp.manager import MCPManager
 
         with make_workspace() as tmp:
             manager = MCPManager(Path(tmp))
@@ -1284,7 +1284,7 @@ class MCPTests(unittest.TestCase):
 
     def test_mcp_tool_toggle_properties(self) -> None:
         # UI panels rely on label/description compatibility properties.
-        from frontend.mcp.models import MCPToolInfo, MCPToolToggle
+        from njucode.mcp.models import MCPToolInfo, MCPToolToggle
 
         info = MCPToolInfo(
             tool_name="read_file",
@@ -1298,8 +1298,8 @@ class MCPTests(unittest.TestCase):
 
     def test_mcp_tool_adapter_converts_schema_to_manifest(self) -> None:
         # JSON schema from MCP tools is converted into internal parameter metadata.
-        from frontend.mcp.models import MCPServerConfig, MCPToolInfo
-        from frontend.mcp.tool_adapter import MCPToolAdapter
+        from njucode.mcp.models import MCPServerConfig, MCPToolInfo
+        from njucode.mcp.tool_adapter import MCPToolAdapter
 
         info = MCPToolInfo(
             tool_name="lookup",
@@ -1327,7 +1327,7 @@ class OpenAIClientTests(unittest.TestCase):
 
     def test_stream_chat_without_api_key_returns_system_hint(self) -> None:
         # Empty API key should produce a helpful local hint, not a network error.
-        from frontend.services.openai_client import OpenAICompatibleClient, OpenAIRequest
+        from njucode.services.openai_client import OpenAICompatibleClient, OpenAIRequest
 
         client = OpenAICompatibleClient()
         request = OpenAIRequest(
@@ -1342,7 +1342,7 @@ class OpenAIClientTests(unittest.TestCase):
 
     def test_build_messages_injects_file_context(self) -> None:
         # File context is inserted as a system message before user history.
-        from frontend.services.openai_client import OpenAICompatibleClient, OpenAIRequest
+        from njucode.services.openai_client import OpenAICompatibleClient, OpenAIRequest
 
         client = OpenAICompatibleClient()
         request = OpenAIRequest(
@@ -1365,7 +1365,7 @@ class ProjectDoctorTests(unittest.TestCase):
 
     def test_project_test_runner_lists_checks(self) -> None:
         # The list is useful for future filtering and command help.
-        from frontend.services.project_testing import ProjectTestRunner
+        from njucode.services.project_testing import ProjectTestRunner
 
         runner = ProjectTestRunner(ROOT)
         checks = runner.list_checks()
@@ -1376,7 +1376,7 @@ class ProjectDoctorTests(unittest.TestCase):
 
     def test_project_test_runner_can_run_selected_checks(self) -> None:
         # Selected checks keep tests fast while exercising report generation.
-        from frontend.services.project_testing import ProjectTestRunner
+        from njucode.services.project_testing import ProjectTestRunner
 
         runner = ProjectTestRunner(ROOT)
         report = runner.run_all(selected=["layout", "python_syntax"])
@@ -1387,7 +1387,7 @@ class ProjectDoctorTests(unittest.TestCase):
 
     def test_doctor_payload_contains_text_and_markdown(self) -> None:
         # Command handlers expect machine fields plus display-ready text.
-        from frontend.services.project_testing import run_doctor_as_payload
+        from njucode.services.project_testing import run_doctor_as_payload
 
         payload = run_doctor_as_payload(ROOT, selected=["layout"])
         self.assertEqual("project_test_report", payload["type"])
@@ -1397,7 +1397,7 @@ class ProjectDoctorTests(unittest.TestCase):
 
     def test_code_analyzer_doctor_command(self) -> None:
         # /doctor is wired through CodeAnalyzer.run_command.
-        from frontend.services.code_analysis import CodeAnalyzer
+        from njucode.services.code_analysis import CodeAnalyzer
 
         analyzer = CodeAnalyzer(ROOT)
         result = analyzer.run_command("/doctor")
@@ -1408,8 +1408,8 @@ class ProjectDoctorTests(unittest.TestCase):
 
     def test_builtin_doctor_skill_executes(self) -> None:
         # builtin.doctor is the Skills-layer entrypoint for the same report.
-        from frontend.services.code_analysis import CodeAnalyzer
-        from frontend.skills.builtin import execute_builtin_skill
+        from njucode.services.code_analysis import CodeAnalyzer
+        from njucode.skills.builtin import execute_builtin_skill
 
         result = execute_builtin_skill("builtin.doctor", CodeAnalyzer(ROOT), {"verbose": False})
         self.assertEqual("project_test_report", result["type"])
@@ -1418,7 +1418,7 @@ class ProjectDoctorTests(unittest.TestCase):
 
     def test_report_to_text_includes_failures_and_warnings(self) -> None:
         # Warning details should be visible in compact chat output.
-        from frontend.services.project_testing import (
+        from njucode.services.project_testing import (
             ProjectCheckResult,
             ProjectIssue,
             ProjectTestReport,
@@ -1482,7 +1482,7 @@ class ModelDataclassTests(unittest.TestCase):
 
     def test_chat_session_defaults_are_unique(self) -> None:
         # Each session should receive its own UUID.
-        from frontend.models import ChatSession
+        from njucode.models import ChatSession
 
         a = ChatSession()
         b = ChatSession()
@@ -1491,7 +1491,7 @@ class ModelDataclassTests(unittest.TestCase):
 
     def test_default_tools_include_expected_permissions(self) -> None:
         # PermissionChecker maps skill permissions to these tool keys.
-        from frontend.models import DEFAULT_TOOLS
+        from njucode.models import DEFAULT_TOOLS
 
         keys = {tool.key for tool in DEFAULT_TOOLS}
         self.assertIn("read_file", keys)
@@ -1501,7 +1501,7 @@ class ModelDataclassTests(unittest.TestCase):
 
     def test_mirror_presets_include_common_providers(self) -> None:
         # ConfigPanel exposes these model endpoint presets.
-        from frontend.models import MIRROR_PRESETS
+        from njucode.models import MIRROR_PRESETS
 
         self.assertIn("official", MIRROR_PRESETS)
         self.assertIn("modelscope", MIRROR_PRESETS)
@@ -1515,7 +1515,7 @@ class RuntimeToolsTests(unittest.TestCase):
 
     def test_hello_world_runtime_tool_returns_pascal_triangle(self) -> None:
         # The Tools panel example should run in an isolated workspace.
-        from frontend.services.runtime_tools import run_hello_world
+        from njucode.services.runtime_tools import run_hello_world
 
         with make_workspace() as tmp:
             output = run_hello_world(Path(tmp))
@@ -1539,7 +1539,7 @@ class FullSystemSmokeTests(unittest.TestCase):
 
     def test_selected_project_doctor_checks_are_clean(self) -> None:
         # Run the highest-signal doctor checks as a final integration smoke test.
-        from frontend.services.project_testing import ProjectTestRunner
+        from njucode.services.project_testing import ProjectTestRunner
 
         report = ProjectTestRunner(ROOT).run_all(
             selected=[
@@ -1560,7 +1560,7 @@ class FullSystemSmokeTests(unittest.TestCase):
 
     def test_complete_doctor_report_is_serializable(self) -> None:
         # Reports should survive JSON roundtrip for future export or CI use.
-        from frontend.services.project_testing import ProjectTestRunner
+        from njucode.services.project_testing import ProjectTestRunner
 
         report = ProjectTestRunner(ROOT).run_all(selected=["layout", "line_budget"])
         payload = report.to_dict()

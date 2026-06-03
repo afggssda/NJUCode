@@ -18,7 +18,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Label, ListView, ListItem, Static
 
-from frontend.skills.models import SkillKind, SkillToggle, SkillStatus
+from ...skills.models import SkillKind, SkillToggle, SkillStatus
 
 
 class SkillToggled(Message):

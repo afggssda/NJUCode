@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "njucode"
+version = "0.5.0"
+description = "NJUCode - 基于 Textual 的终端代码助手（Code Agent）"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "NJUCode Team"},
+]
+keywords = ["code-agent", "tui", "cli", "code-analysis", "patch-engine"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: User Interfaces",
+]
+dependencies = [
+    "textual>=0.59.0",
+    "rich>=13.7.0",
+    "pydantic>=2.8.0",
+    "python-dotenv>=1.0.1",
+    "openai>=1.30.0",
+    "mcp>=1.27.0",
+]
+
+[project.optional-dependencies]
+syntax = [
+    "tree-sitter>=0.21.0",
+    "tree-sitter-languages>=1.10.2",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-java",
+    "tree-sitter-go",
+    "tree-sitter-rust",
+    "tree-sitter-json",
+    "tree-sitter-yaml",
+    "tree-sitter-markdown",
+    "tree-sitter-bash",
+    "tree-sitter-html",
+    "tree-sitter-css",
+    "tree-sitter-sql",
+    "tree-sitter-toml",
+]
+
+[project.scripts]
+njucode = "njucode.app:main"
+
+[project.urls]
+Homepage = "https://github.com/afggssda/NJUCode"
+Repository = "https://github.com/afggssda/NJUCode"
+
+[tool.setuptools.packages.find]
+include = ["njucode*"]
+
+[tool.setuptools.package-data]
+njucode = ["app.tcss"]

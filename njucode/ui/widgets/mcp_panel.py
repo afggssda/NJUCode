@@ -16,7 +16,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Button, Label, ListView, ListItem, Static
 
-from frontend.mcp.models import MCPServerConfig, MCPConnectionState, MCPToolToggle
+from ...mcp.models import MCPServerConfig, MCPConnectionState, MCPToolToggle
 
 
 class MCPServerConnectRequested(Message):

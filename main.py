@@ -1,4 +1,4 @@
-from frontend.app import NjuCodeApp
+from njucode.app import NjuCodeApp
 
 
 if __name__ == "__main__":

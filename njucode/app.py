@@ -1726,3 +1726,8 @@ class NjuCodeApp(App):
             self.mcp_loop.call_soon_threadsafe(self.mcp_loop.stop)
 
         self.state.save()
+
+
+def main() -> None:
+    """Entry point for the ``njucode`` console script."""
+    NjuCodeApp().run()

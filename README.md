@@ -8,17 +8,24 @@
 ## 项目结构
 ```text
 NJUCode/
+├── pyproject.toml
 ├── .env.example
 ├── main.py
 ├── requirements.txt
 ├── LICENSE
 ├── README.md
 ├── hello_world.py
+├── 手册/
+│   ├── 需求文档.md
+│   ├── 项目管理计划.md
+│   ├── SBOM清单.md
+│   ├── 安装说明.md
+│   └── njucode-0.5.0-py3-none-any.whl
 ├── 改动/
 │   ├── 3.31_jingyu_change.md
 │   ├── 4.16_jingyu_change.md
 │   └── idea.md
-├── frontend/
+├── njucode/
 │   ├── __init__.py
 │   ├── app.py
 │   ├── app.tcss
@@ -28,9 +35,32 @@ NJUCode/
 │   │   ├── __init__.py
 │   │   ├── openai_client.py
 │   │   ├── code_analysis.py
+│   │   ├── code_extractor.py
+│   │   ├── code_metrics.py
+│   │   ├── context_compressor.py
+│   │   ├── patch_engine.py
 │   │   ├── project_testing.py
 │   │   ├── settings_store.py
+│   │   ├── task_index.py
 │   │   └── runtime_tools.py
+│   ├── skills/
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── registry.py
+│   │   ├── executor.py
+│   │   ├── permissions.py
+│   │   ├── audit_log.py
+│   │   ├── builtin/
+│   │   │   └── __init__.py
+│   │   └── plugins/
+│   │       └── __init__.py
+│   ├── mcp/
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── client.py
+│   │   ├── manager.py
+│   │   ├── executor.py
+│   │   └── tool_adapter.py
 │   └── ui/
 │       ├── __init__.py
 │       └── widgets/
@@ -40,8 +70,11 @@ NJUCode/
 │           ├── config_panel.py
 │           ├── file_tree_panel.py
 │           ├── session_panel.py
-│           ├── splitter.py
-│           └── tools_panel.py
+│           ├── tools_panel.py
+│           ├── skills_panel.py
+│           ├── mcp_panel.py
+│           ├── patch_panel.py
+│           └── splitter.py
 ├── .nju_code/settings.json
 ├── test_all_features.py
 ├── 需求文档.md
@@ -176,6 +209,17 @@ python test_all_features.py
 ### WBS-7 测试与质量保障
 - 为分析引擎补齐单元测试
 - 为关键 UI 交互补齐回归检查
+
+## 团队成员与分工
+
+| 成员 | 负责模块 | 主要工作 |
+|------|----------|----------|
+| 李承泽 | CLI/TUI 与交互框架 | 基于 Textual 的三栏布局（Explorer / Code+Tools+Model / Chat）、CSS 样式系统、键盘快捷键绑定、分割条拖拽、流式输出与中断、聊天面板、代码查看面板（语法高亮与编辑保存）、配置面板、文件树面板（工作区浏览、新建/删除/撤销删除）、Tools 工作台面板、整体事件调度与组件编排 |
+| 丁一鸣 | Session 与上下文压缩 | 会话管理（创建/切换/重命名/删除/导出/导入）、会话面板 UI、ChatSession/ChatMessage 数据模型、AppState 全局状态管理、ContextCompressor 上下文压缩引擎（双语 token 估算、增量压缩、摘要质量验证与重试、自适应保留策略、压缩历史元数据追踪） |
+| 周靖宇 | 代码检索与多文件分析 | CodeAnalyzer 代码分析引擎（项目扫描与索引、文本/正则检索、Python 符号检索、文件摘要、依赖图与邻接分析、自然语言 Top-K 召回、影响面分析）、CodeMetrics 静态代码指标（圈复杂度、fan-in/fan-out、import 环检测、维护热点排序）、TaskIndex 任务/TODO 扫描器、CodeExtractor 代码块提取、Project Doctor 项目自检系统 |
+| 程楷诺 | Patch/回滚与执行引擎 | PatchEngine 补丁引擎（PatchStatus 生命周期状态机、PatchOperation 单文件变更与 diff 生成、PatchTask 多文件原子补丁、备份/应用/回滚/取消）、PatchHistoryStore JSON 持久化存储、PatchPanel 补丁 UI 面板（预览/确认/回滚/刷新） |
+| 曹喆 | Skills 插件系统 | SkillRegistry 技能注册中心（内置技能/外部插件加载/命令映射/启停管理）、SkillExecutor 执行引擎（参数校验/权限检查/结果格式化）、PermissionChecker 权限控制系统、AuditLogger 审计日志、MCP 协议集成（Manager 管理器/Client 客户端/Executor 执行器/ToolAdapter 适配器）、SkillsPanel 与 MCPPanel UI 面板 |
+| 陈志远 | 模型路由、成本统计、测试与CI | OpenAICompatibleClient 模型客户端（多镜像/多模型兼容流式接口）、ModelConfig 模型配置与镜像预设切换、SettingsStore 持久化配置、RuntimeTools 运行时工具、test_all_features.py 综合回归测试套件（unittest 标准库，覆盖核心服务与跨模块集成）、Markdown/JSON 测试报告生成 |
 
 ## 变更记录
 详细改动见改动目录
