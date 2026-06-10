@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 .test_tmp/
 # 其他常见的 Python 忽略项（可选）
+.env
 .venv/
 env/
 venv/
